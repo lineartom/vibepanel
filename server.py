@@ -12,16 +12,6 @@ app = Flask(__name__)
 TMUX_TARGET = os.environ.get("TMUX_TARGET", "minecraft")
 JARS_DIR    = os.environ.get("JARS_DIR", "server-jars")
 SERVER_DIR  = os.environ.get("SERVER_DIR", "")
-GAME_DIR    = os.environ.get("GAME_DIR", "")
-
-
-def game_dir() -> str:
-    """Directory that contains get-me-fabric.sh and the server files."""
-    if GAME_DIR:
-        return GAME_DIR
-    if SERVER_DIR:
-        return SERVER_DIR
-    return os.path.dirname(os.path.abspath(JARS_DIR)) or "."
 
 _ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _MC_FMT = re.compile(r'§[0-9a-fklmnorABCDEFKLMNOR]')
@@ -44,6 +34,15 @@ def tmux_capture(lines: int = 300) -> str:
         capture_output=True, text=True, check=True,
     )
     return clean(result.stdout)
+
+
+def tmux_pane_path() -> str:
+    """Return the current working directory of the tmux pane."""
+    result = subprocess.run(
+        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_path}"],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
 
 
 @app.route("/")
@@ -212,7 +211,11 @@ def api_download_fabric():
     if version and not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.\-]*$', version):
         return jsonify({"ok": False, "error": "Invalid version string"}), 400
 
-    gdir   = game_dir()
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
     script = os.path.join(gdir, "get-me-fabric.sh")
     if not os.path.isfile(script):
         return jsonify({"ok": False, "error": f"Script not found: {script}"}), 404
@@ -277,8 +280,6 @@ if __name__ == "__main__":
                         help="path to server-jars directory (default: ./server-jars)")
     parser.add_argument("--server-dir", default=None,
                         help="working directory to cd into before starting the server")
-    parser.add_argument("--game-dir", default=None,
-                        help="directory containing get-me-fabric.sh (default: parent of jars-dir)")
     args = parser.parse_args()
 
     if args.session:
@@ -287,8 +288,6 @@ if __name__ == "__main__":
         JARS_DIR = args.jars_dir
     if args.server_dir:
         SERVER_DIR = args.server_dir
-    if args.game_dir:
-        GAME_DIR = args.game_dir
 
     print(f"VibePanel starting on http://{args.host}:{args.port}  "
           f"(tmux: {TMUX_TARGET}, jars: {JARS_DIR})")
