@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VibePanel</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Desktop sidebar -->
+  <nav id="sidebar">
+    <div class="nav-brand">
+      <span class="nav-brand-icon">&#x26CF;</span>
+      <span class="nav-brand-name">VibePanel</span>
+    </div>
+    <div class="nav-links">
+      <a href="#" class="nav-link active" data-page="console">
+        <span class="nav-icon">&#x1F5A5;</span><span>Console</span>
+      </a>
+      <a href="#" class="nav-link" data-page="players">
+        <span class="nav-icon">&#x1F465;</span><span>Players</span>
+      </a>
+      <a href="#" class="nav-link" data-page="say">
+        <span class="nav-icon">&#x1F4AC;</span><span>Say</span>
+      </a>
+    </div>
+    <div class="nav-footer">
+      <div id="sidebar-status" class="conn-badge">
+        <span class="conn-dot"></span>
+        <span id="sidebar-status-text">Connecting</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Mobile bottom nav -->
+  <nav id="bottom-nav">
+    <a href="#" class="nav-link active" data-page="console">
+      <span class="nav-icon">&#x1F5A5;</span><span>Console</span>
+    </a>
+    <a href="#" class="nav-link" data-page="players">
+      <span class="nav-icon">&#x1F465;</span><span>Players</span>
+    </a>
+    <a href="#" class="nav-link" data-page="say">
+      <span class="nav-icon">&#x1F4AC;</span><span>Say</span>
+    </a>
+  </nav>
+
+  <main id="content">
+
+    <!-- Console -->
+    <section id="page-console" class="page active">
+      <header class="page-header">
+        <h1>Console</h1>
+        <div id="console-conn" class="conn-badge">
+          <span class="conn-dot"></span>
+          <span id="console-conn-text">Connecting</span>
+        </div>
+      </header>
+      <div id="console-out" class="terminal" aria-live="polite" aria-label="Server console output"></div>
+    </section>
+
+    <!-- Players -->
+    <section id="page-players" class="page">
+      <header class="page-header">
+        <h1>Players</h1>
+        <button id="btn-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+      </header>
+      <div id="players-body">
+        <p class="hint">Hit Refresh to query the server.</p>
+      </div>
+    </section>
+
+    <!-- Say -->
+    <section id="page-say" class="page">
+      <header class="page-header">
+        <h1>Say</h1>
+      </header>
+      <div class="card say-card">
+        <label class="field-label" for="say-input">Message <span class="muted">(broadcasts as [Server])</span></label>
+        <textarea id="say-input" class="say-textarea" rows="3" maxlength="256"
+                  placeholder="Type something&#x2026;"></textarea>
+        <div class="say-row">
+          <span id="char-count" class="char-count">0 / 256</span>
+          <button id="btn-say" class="btn btn-primary">Send</button>
+        </div>
+        <div id="say-feedback" aria-live="polite"></div>
+      </div>
+      <div id="say-history-wrap">
+        <h2 class="section-title">Sent</h2>
+        <div id="say-history"></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

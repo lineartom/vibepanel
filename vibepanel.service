@@ -1,0 +1,21 @@
+# Drop this in /etc/systemd/system/ and run:
+#   systemctl daemon-reload
+#   systemctl enable --now vibepanel
+#
+# Adjust User, WorkingDirectory, and --session as needed.
+
+[Unit]
+Description=VibePanel — Minecraft web frontend
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/path/to/vibepanel
+ExecStart=/path/to/vibepanel/.venv/bin/python server.py --session minecraft --port 8080
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
