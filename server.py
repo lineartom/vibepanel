@@ -12,6 +12,16 @@ app = Flask(__name__)
 TMUX_TARGET = os.environ.get("TMUX_TARGET", "minecraft")
 JARS_DIR    = os.environ.get("JARS_DIR", "server-jars")
 SERVER_DIR  = os.environ.get("SERVER_DIR", "")
+GAME_DIR    = os.environ.get("GAME_DIR", "")
+
+
+def game_dir() -> str:
+    """Directory that contains get-me-fabric.sh and the server files."""
+    if GAME_DIR:
+        return GAME_DIR
+    if SERVER_DIR:
+        return SERVER_DIR
+    return os.path.dirname(os.path.abspath(JARS_DIR)) or "."
 
 _ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _MC_FMT = re.compile(r'§[0-9a-fklmnorABCDEFKLMNOR]')
@@ -193,6 +203,42 @@ def api_server_start():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/server/download-fabric", methods=["POST"])
+def api_download_fabric():
+    """Run get-me-fabric.sh to download a Fabric server jar into JARS_DIR."""
+    data    = request.get_json(force=True, silent=True) or {}
+    version = str(data.get("version", "")).strip()
+
+    if version and not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.\-]*$', version):
+        return jsonify({"ok": False, "error": "Invalid version string"}), 400
+
+    gdir   = game_dir()
+    script = os.path.join(gdir, "get-me-fabric.sh")
+    if not os.path.isfile(script):
+        return jsonify({"ok": False, "error": f"Script not found: {script}"}), 404
+
+    cmd = [script, os.path.abspath(JARS_DIR)]
+    if version:
+        cmd.append(version)
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, cwd=gdir,
+        )
+        output = (result.stdout + result.stderr).strip()
+        if result.returncode == 0:
+            return jsonify({"ok": True, "output": output})
+        return jsonify({
+            "ok": False,
+            "error": f"Script exited with code {result.returncode}",
+            "output": output,
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "Download timed out after 120 s"}), 504
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/console/stream")
 def api_console_stream():
     def generate():
@@ -231,6 +277,8 @@ if __name__ == "__main__":
                         help="path to server-jars directory (default: ./server-jars)")
     parser.add_argument("--server-dir", default=None,
                         help="working directory to cd into before starting the server")
+    parser.add_argument("--game-dir", default=None,
+                        help="directory containing get-me-fabric.sh (default: parent of jars-dir)")
     args = parser.parse_args()
 
     if args.session:
@@ -239,6 +287,8 @@ if __name__ == "__main__":
         JARS_DIR = args.jars_dir
     if args.server_dir:
         SERVER_DIR = args.server_dir
+    if args.game_dir:
+        GAME_DIR = args.game_dir
 
     print(f"VibePanel starting on http://{args.host}:{args.port}  "
           f"(tmux: {TMUX_TARGET}, jars: {JARS_DIR})")

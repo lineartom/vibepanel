@@ -416,6 +416,30 @@ a { text-decoration: none; color: inherit; }
   min-height: 1.2em;
 }
 
+.dl-card { flex-shrink: 0; }
+.dl-row {
+  display: flex;
+  gap: .6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.dl-output {
+  background: var(--term-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .75rem 1rem;
+  font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  font-size: .8rem;
+  line-height: 1.55;
+  color: var(--term-fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+.dl-output.error { color: var(--red); border-color: var(--red); }
+
 /* ── Buttons ────────────────────────────────────────────── */
 .btn {
   display: inline-flex; align-items: center; gap: .4rem;

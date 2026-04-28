@@ -337,6 +337,53 @@ $('btn-srv-refresh').addEventListener('click', () => {
   loadJars();
 });
 
+// ── Download Fabric ───────────────────────────────────────
+
+$('btn-download').addEventListener('click', async () => {
+  const version    = $('fabric-version').value.trim();
+  const btn        = $('btn-download');
+  const outputWrap = $('dl-output-wrap');
+  const output     = $('dl-output');
+
+  if (version && !/^[a-zA-Z0-9][a-zA-Z0-9.\-]*$/.test(version)) {
+    output.textContent = 'Invalid version string.';
+    output.className = 'dl-output error';
+    outputWrap.hidden = false;
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '↓ Downloading…';
+  outputWrap.hidden = true;
+
+  try {
+    const res  = await fetch('/api/server/download-fabric', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ version: version || null }),
+    });
+    const data = await res.json();
+
+    const text = data.output || data.error || (data.ok ? 'Done.' : 'Unknown error.');
+    output.textContent = text;
+    output.className = 'dl-output' + (data.ok ? '' : ' error');
+    outputWrap.hidden = false;
+
+    if (data.ok) {
+      // Refresh jar list so the new file appears immediately
+      jarsLoaded = false;
+      loadJars();
+    }
+  } catch (err) {
+    output.textContent = `Network error: ${err.message}`;
+    output.className = 'dl-output error';
+    outputWrap.hidden = false;
+  }
+
+  btn.disabled = false;
+  btn.textContent = '↓ Download';
+});
+
 $('btn-start').addEventListener('click', async () => {
   if (!selectedJar) return;
   const mem      = $('mem-input').value.trim().toUpperCase();

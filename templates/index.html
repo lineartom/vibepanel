@@ -126,6 +126,22 @@
         <button id="btn-start" class="btn btn-primary btn-wide" disabled>&#x25B6; Start Server</button>
         <div id="start-feedback" aria-live="polite"></div>
       </div>
+
+      <!-- Download Fabric — always visible -->
+      <h2 class="section-title">Download Fabric</h2>
+      <div class="card dl-card">
+        <label class="field-label" for="fabric-version">
+          Version <span class="muted">(leave blank for latest)</span>
+        </label>
+        <div class="dl-row">
+          <input id="fabric-version" class="mem-input" type="text"
+                 placeholder="e.g. 1.21.1" autocomplete="off" spellcheck="false">
+          <button id="btn-download" class="btn btn-ghost">&#x2193; Download</button>
+        </div>
+      </div>
+      <div id="dl-output-wrap" hidden>
+        <pre id="dl-output" class="dl-output"></pre>
+      </div>
     </section>
 
   </main>
