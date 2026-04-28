@@ -95,22 +95,49 @@ def api_say():
 
 @app.route("/api/server/status")
 def api_server_status():
-    """Detect whether a Minecraft server process is running and which jar it uses."""
+    """Detect whether a Minecraft server process is running inside our tmux pane."""
     try:
-        result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
-        abs_jars = os.path.abspath(JARS_DIR)
-        jars_name = os.path.basename(abs_jars)
-        for line in result.stdout.splitlines():
-            if "java" not in line or "grep" in line:
+        # Is the foreground process in our pane actually java?
+        current = subprocess.run(
+            ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_command}"],
+            capture_output=True, text=True,
+        )
+        if current.returncode != 0:
+            return jsonify({"running": False})
+        if current.stdout.strip().lower() != "java":
+            return jsonify({"running": False})
+
+        # Get the shell PID that owns this pane, then find its java child.
+        pane_pid = subprocess.run(
+            ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_pid}"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        children = subprocess.run(
+            ["pgrep", "-P", pane_pid],
+            capture_output=True, text=True,
+        ).stdout.splitlines()
+
+        for child_pid in children:
+            child_pid = child_pid.strip()
+            if not child_pid:
                 continue
-            m = re.search(r"-jar\s+(\S+\.jar)", line)
-            if not m:
+            args = subprocess.run(
+                ["ps", "-ww", "-o", "args=", "-p", child_pid],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            if "java" not in args:
                 continue
-            jar_in_cmd = m.group(1)
-            if (jars_name + "/" in jar_in_cmd
-                    or abs_jars in jar_in_cmd
-                    or "nogui" in line):
-                return jsonify({"running": True, "jar": os.path.basename(jar_in_cmd)})
+            m = re.search(r"-jar\s+(\S+\.jar)", args)
+            return jsonify({
+                "running": True,
+                "jar": os.path.basename(m.group(1)) if m else None,
+            })
+
+        # pane_current_command was java but child lookup raced — still running
+        return jsonify({"running": True, "jar": None})
+
+    except subprocess.CalledProcessError:
         return jsonify({"running": False})
     except Exception as e:
         return jsonify({"running": False, "error": str(e)})
