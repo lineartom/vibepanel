@@ -25,6 +25,9 @@
       <a href="#" class="nav-link" data-page="say">
         <span class="nav-icon">&#x1F4AC;</span><span>Say</span>
       </a>
+      <a href="#" class="nav-link" data-page="server">
+        <span class="nav-icon">&#x2699;&#xFE0F;</span><span>Server</span>
+      </a>
     </div>
     <div class="nav-footer">
       <div id="sidebar-status" class="conn-badge">
@@ -44,6 +47,9 @@
     </a>
     <a href="#" class="nav-link" data-page="say">
       <span class="nav-icon">&#x1F4AC;</span><span>Say</span>
+    </a>
+    <a href="#" class="nav-link" data-page="server">
+      <span class="nav-icon">&#x2699;&#xFE0F;</span><span>Server</span>
     </a>
   </nav>
 
@@ -90,6 +96,35 @@
       <div id="say-history-wrap">
         <h2 class="section-title">Sent</h2>
         <div id="say-history"></div>
+      </div>
+    </section>
+
+    <!-- Server -->
+    <section id="page-server" class="page">
+      <header class="page-header">
+        <h1>Server</h1>
+        <button id="btn-srv-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+      </header>
+
+      <!-- Status card -->
+      <div class="card" id="srv-status-card">
+        <p class="hint">Loading&hellip;</p>
+      </div>
+
+      <!-- Start form — shown only when stopped -->
+      <div id="srv-start-section" hidden>
+        <h2 class="section-title">Start Server</h2>
+        <div id="jar-list-wrap">
+          <p class="hint">Loading&hellip;</p>
+        </div>
+        <div class="card mem-card">
+          <label class="field-label" for="mem-input">Memory <span class="muted">(-Xmx and -Xms)</span></label>
+          <input id="mem-input" class="mem-input" type="text" value="1024M"
+                 placeholder="e.g. 1024M or 2G" autocomplete="off" spellcheck="false">
+          <p class="hint">Common: 512M &bull; 1024M &bull; 2G &bull; 4G</p>
+        </div>
+        <button id="btn-start" class="btn btn-primary btn-wide" disabled>&#x25B6; Start Server</button>
+        <div id="start-feedback" aria-live="polite"></div>
       </div>
     </section>
 

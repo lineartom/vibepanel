@@ -18,6 +18,10 @@ let activePage = 'console';
 
 function navigate(page) {
   if (page === activePage) return;
+
+  // Page-leave hooks
+  if (activePage === 'server') srvStopPolling();
+
   activePage = page;
 
   document.querySelectorAll('.page').forEach(el => el.classList.remove('active'));
@@ -26,7 +30,9 @@ function navigate(page) {
   $(`page-${page}`).classList.add('active');
   document.querySelectorAll(`.nav-link[data-page="${page}"]`).forEach(el => el.classList.add('active'));
 
+  // Page-enter hooks
   if (page === 'players') loadPlayers();
+  if (page === 'server')  srvStartPolling();
 }
 
 document.querySelectorAll('.nav-link').forEach(link => {
@@ -233,6 +239,145 @@ function renderHistory() {
       <div class="history-msg">${esc(h.msg)}</div>
     </div>`).join('');
 }
+
+// ── Server ───────────────────────────────────────────────
+
+let srvPollTimer  = null;
+let selectedJar   = null;
+let jarsLoaded    = false;
+
+function srvStartPolling() {
+  loadServerStatus();
+  loadJars();
+  srvPollTimer = setInterval(loadServerStatus, 5000);
+}
+
+function srvStopPolling() {
+  clearInterval(srvPollTimer);
+  srvPollTimer = null;
+}
+
+async function loadServerStatus() {
+  const card = $('srv-status-card');
+  try {
+    const res  = await fetch('/api/server/status');
+    const data = await res.json();
+
+    if (data.running) {
+      card.innerHTML = `
+        <div class="srv-status-row">
+          <span class="srv-dot running"></span>
+          <span class="srv-status-label">Running</span>
+        </div>
+        <div class="srv-jar">${esc(data.jar)}</div>`;
+      $('srv-start-section').hidden = true;
+    } else {
+      card.innerHTML = `
+        <div class="srv-status-row">
+          <span class="srv-dot stopped"></span>
+          <span class="srv-status-label">Stopped</span>
+        </div>`;
+      $('srv-start-section').hidden = false;
+      // Re-enable start button if a jar is still selected
+      $('btn-start').disabled = !selectedJar;
+    }
+  } catch (err) {
+    card.innerHTML = `<p class="hint">Error: ${esc(err.message)}</p>`;
+  }
+}
+
+async function loadJars() {
+  if (jarsLoaded) return;
+  const wrap = $('jar-list-wrap');
+  try {
+    const res  = await fetch('/api/server/jars');
+    const data = await res.json();
+
+    if (!data.ok) {
+      wrap.innerHTML = `<p class="hint">Error: ${esc(data.error)}</p>`;
+      return;
+    }
+    if (data.jars.length === 0) {
+      wrap.innerHTML = `<p class="hint">No .jar files found in <code>${esc(data.jars_dir)}</code>.</p>`;
+      return;
+    }
+
+    // Auto-select if only one jar
+    if (data.jars.length === 1) selectedJar = data.jars[0];
+
+    wrap.innerHTML = '<div class="jar-list"></div>';
+    const list = wrap.querySelector('.jar-list');
+    data.jars.forEach(jar => {
+      const row = document.createElement('div');
+      row.className = 'jar-item' + (jar === selectedJar ? ' selected' : '');
+      row.dataset.jar = jar;
+      row.innerHTML = `<span class="jar-radio"></span><span class="jar-name">${esc(jar)}</span>`;
+      row.addEventListener('click', () => selectJar(jar));
+      list.appendChild(row);
+    });
+
+    $('btn-start').disabled = !selectedJar;
+    jarsLoaded = true;
+  } catch (err) {
+    wrap.innerHTML = `<p class="hint">Error: ${esc(err.message)}</p>`;
+  }
+}
+
+function selectJar(jar) {
+  selectedJar = jar;
+  $('jar-list-wrap').querySelectorAll('.jar-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.jar === jar);
+  });
+  $('btn-start').disabled = false;
+}
+
+$('btn-srv-refresh').addEventListener('click', () => {
+  jarsLoaded = false;
+  loadServerStatus();
+  loadJars();
+});
+
+$('btn-start').addEventListener('click', async () => {
+  if (!selectedJar) return;
+  const mem      = $('mem-input').value.trim().toUpperCase();
+  const btn      = $('btn-start');
+  const feedback = $('start-feedback');
+
+  if (!/^\d+[MG]$/.test(mem)) {
+    feedback.textContent = 'Invalid memory format — use e.g. 1024M or 2G';
+    feedback.className = 'fb-error';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Starting…';
+  feedback.textContent = '';
+  feedback.className = '';
+
+  try {
+    const res  = await fetch('/api/server/start', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ jar: selectedJar, mem }),
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      feedback.textContent = '✓ Start command sent — server will appear as Running shortly.';
+      feedback.className = 'fb-ok';
+      setTimeout(loadServerStatus, 2500);
+    } else {
+      feedback.textContent = `Error: ${data.error}`;
+      feedback.className = 'fb-error';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    feedback.textContent = `Network error: ${err.message}`;
+    feedback.className = 'fb-error';
+    btn.disabled = false;
+  }
+  btn.textContent = '▶ Start Server';
+});
 
 // ── Boot ─────────────────────────────────────────────────
 
