@@ -92,8 +92,12 @@ def api_say():
             return jsonify({"ok": False, "error": "Empty message"}), 400
         if len(message) > 256:
             return jsonify({"ok": False, "error": "Message too long (max 256 chars)"}), 400
-        # Strip anything that could inject additional tmux keystrokes
-        message = message.replace('\n', ' ').replace('\r', '').replace('\x00', '')
+        # Strip all C0 and C1 control characters. Leaving any in (e.g. \x03 Ctrl+C,
+        # \x1a Ctrl+Z, \x04 EOF) would send signals to the tmux pane's foreground
+        # process via the pty line discipline, potentially killing the server.
+        message = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', message)
+        if not message:
+            return jsonify({"ok": False, "error": "Message was empty after stripping control characters"}), 400
         tmux_send(f"say {message}")
         return jsonify({"ok": True})
     except subprocess.CalledProcessError as e:
@@ -180,6 +184,14 @@ def api_server_start():
     jar_path = os.path.abspath(os.path.join(JARS_DIR, jar))
     if not os.path.isfile(jar_path):
         return jsonify({"ok": False, "error": f"Jar not found: {jar}"}), 404
+
+    # Guard: don't type a start command into a running server's console.
+    current = subprocess.run(
+        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_command}"],
+        capture_output=True, text=True,
+    )
+    if current.returncode == 0 and current.stdout.strip().lower() == "java":
+        return jsonify({"ok": False, "error": "Server is already running"}), 409
 
     cmd = f"java -Xmx{mem} -Xms{mem} -jar {jar_path} nogui"
     if SERVER_DIR:
