@@ -285,7 +285,46 @@ let jarsLoaded    = false;
 function srvStartPolling() {
   loadServerStatus();
   loadJars();
+  loadServerIdentity();
   srvPollTimer = setInterval(loadServerStatus, 5000);
+}
+
+async function loadServerIdentity() {
+  const wrap  = $('srv-identity');
+  const icon  = $('srv-icon');
+  const motdEl = $('srv-motd');
+
+  try {
+    const res  = await fetch('/api/server/identity');
+    const data = await res.json();
+    if (!data.ok) { wrap.hidden = true; return; }
+
+    const motdLines = data.motd
+      ? data.motd.split('\n').filter(l => l.length > 0)
+      : [];
+
+    if (!data.has_icon && motdLines.length === 0) {
+      wrap.hidden = true;
+      return;
+    }
+
+    icon.hidden = !data.has_icon;
+    if (data.has_icon) {
+      icon.src = `/api/server/icon?t=${Date.now()}`;
+      icon.onerror = () => { icon.hidden = true; };
+    }
+
+    motdEl.hidden = motdLines.length === 0;
+    if (motdLines.length > 0) {
+      motdEl.innerHTML = motdLines
+        .map(l => `<div class="srv-motd-line">${esc(l)}</div>`)
+        .join('');
+    }
+
+    wrap.hidden = false;
+  } catch (_) {
+    wrap.hidden = true;
+  }
 }
 
 function srvStopPolling() {
@@ -369,6 +408,7 @@ $('btn-srv-refresh').addEventListener('click', () => {
   jarsLoaded = false;
   loadServerStatus();
   loadJars();
+  loadServerIdentity();
 });
 
 // ── Download Fabric ───────────────────────────────────────

@@ -5,7 +5,7 @@ import time
 import json
 import argparse
 import subprocess
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 
 app = Flask(__name__)
 
@@ -252,6 +252,56 @@ def api_download_fabric():
         return jsonify({"ok": False, "error": "Download timed out after 120 s"}), 504
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/server/identity")
+def api_server_identity():
+    """Return server icon availability and cleaned MOTD from server.properties."""
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    has_icon = os.path.isfile(os.path.join(gdir, "server-icon.png"))
+
+    motd = None
+    props = os.path.join(gdir, "server.properties")
+    if os.path.isfile(props):
+        try:
+            with open(props, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    key, _, val = line.strip().partition("=")
+                    if key == "motd":
+                        motd = val
+                        break
+            if motd is not None:
+                # Resolve \uXXXX escapes first (§ = § is common in MOTDs)
+                motd = re.sub(r'\\u([0-9a-fA-F]{4})',
+                              lambda m: chr(int(m.group(1), 16)), motd)
+                # Strip § colour/formatting codes
+                motd = re.sub(r'§.', '', motd)
+                # Convert remaining Java property escapes
+                motd = motd.replace('\\n', '\n').replace('\\t', '\t') \
+                           .replace('\\\\', '\\')
+                motd = motd.strip() or None
+        except Exception:
+            pass
+
+    return jsonify({"ok": True, "has_icon": has_icon, "motd": motd})
+
+
+@app.route("/api/server/icon")
+def api_server_icon():
+    """Serve the server-icon.png from the tmux pane's working directory."""
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    icon = os.path.join(gdir, "server-icon.png")
+    if not os.path.isfile(icon):
+        return jsonify({"ok": False, "error": "No server-icon.png"}), 404
+    return send_file(icon, mimetype="image/png")
 
 
 @app.route("/api/console/stream")

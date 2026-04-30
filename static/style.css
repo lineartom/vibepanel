@@ -317,6 +317,28 @@ a { text-decoration: none; color: inherit; }
 /* ── Server page ────────────────────────────────────────── */
 #page-server { overflow-y: auto; }
 
+.srv-identity-card {
+  flex-direction: row;
+  align-items: center;
+  gap: 1rem;
+  flex-shrink: 0;
+}
+.srv-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 4px;
+  image-rendering: pixelated;
+  flex-shrink: 0;
+}
+.srv-motd { flex: 1; min-width: 0; }
+.srv-motd-line {
+  font-size: .95rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.srv-motd-line + .srv-motd-line { color: var(--text2); }
+
 .srv-status-row {
   display: flex;
   align-items: center;
