@@ -31,7 +31,8 @@ function navigate(page) {
   document.querySelectorAll(`.nav-link[data-page="${page}"]`).forEach(el => el.classList.add('active'));
 
   // Page-enter hooks
-  if (page === 'players') loadPlayers();
+  if (page === 'players') fetchServerRunning().then(() => { if (serverRunning !== false) loadPlayers(); });
+  if (page === 'say')     fetchServerRunning();
   if (page === 'server')  srvStartPolling();
 }
 
@@ -153,7 +154,7 @@ async function loadPlayers() {
       </div>`;
   } finally {
     loadingPlayers = false;
-    btnRefresh.disabled = false;
+    btnRefresh.disabled = serverRunning === false;
     btnRefresh.textContent = '↺ Refresh';
   }
 }
@@ -216,7 +217,7 @@ async function sendSay() {
     sayFeedback.textContent = `Network error: ${err.message}`;
     sayFeedback.className = 'fb-error';
   } finally {
-    btnSay.disabled = false;
+    btnSay.disabled = serverRunning === false;
     btnSay.textContent = 'Send';
   }
 }
@@ -240,6 +241,41 @@ function renderHistory() {
     </div>`).join('');
 }
 
+// ── Server running state (shared across pages) ───────────
+
+let serverRunning = null;
+
+async function fetchServerRunning() {
+  try {
+    const res  = await fetch('/api/server/status');
+    const data = await res.json();
+    serverRunning = data.running;
+    applyServerRunningState();
+    return data;
+  } catch (_) {
+    return null;
+  }
+}
+
+function applyServerRunningState() {
+  const offline = serverRunning === false;
+
+  // Players: gate Refresh; replace hint with offline message if no real data yet
+  $('btn-refresh').disabled = offline;
+  if (offline && !$('players-body').querySelector('.players-stat')) {
+    $('players-body').innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">&#x26D4;</div>
+        <p>Server is not running.</p>
+      </div>`;
+  }
+
+  // Say: disable inputs and show notice
+  $('say-input').disabled = offline;
+  $('btn-say').disabled   = offline;
+  $('say-offline-note').hidden = !offline;
+}
+
 // ── Server ───────────────────────────────────────────────
 
 let srvPollTimer  = null;
@@ -259,30 +295,28 @@ function srvStopPolling() {
 
 async function loadServerStatus() {
   const card = $('srv-status-card');
-  try {
-    const res  = await fetch('/api/server/status');
-    const data = await res.json();
+  const data = await fetchServerRunning();
 
-    if (data.running) {
-      card.innerHTML = `
-        <div class="srv-status-row">
-          <span class="srv-dot running"></span>
-          <span class="srv-status-label">Running</span>
-        </div>
-        <div class="srv-jar">${esc(data.jar)}</div>`;
-      $('srv-start-section').hidden = true;
-    } else {
-      card.innerHTML = `
-        <div class="srv-status-row">
-          <span class="srv-dot stopped"></span>
-          <span class="srv-status-label">Stopped</span>
-        </div>`;
-      $('srv-start-section').hidden = false;
-      // Re-enable start button if a jar is still selected
-      $('btn-start').disabled = !selectedJar;
-    }
-  } catch (err) {
-    card.innerHTML = `<p class="hint">Error: ${esc(err.message)}</p>`;
+  if (!data) {
+    card.innerHTML = `<p class="hint">Could not reach server.</p>`;
+    return;
+  }
+  if (data.running) {
+    card.innerHTML = `
+      <div class="srv-status-row">
+        <span class="srv-dot running"></span>
+        <span class="srv-status-label">Running</span>
+      </div>
+      ${data.jar ? `<div class="srv-jar">${esc(data.jar)}</div>` : ''}`;
+    $('srv-start-section').hidden = true;
+  } else {
+    card.innerHTML = `
+      <div class="srv-status-row">
+        <span class="srv-dot stopped"></span>
+        <span class="srv-status-label">Stopped</span>
+      </div>`;
+    $('srv-start-section').hidden = false;
+    $('btn-start').disabled = !selectedJar;
   }
 }
 
@@ -430,3 +464,5 @@ $('btn-start').addEventListener('click', async () => {
 
 renderHistory();
 initConsole();
+fetchServerRunning();
+setInterval(fetchServerRunning, 15000);
