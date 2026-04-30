@@ -160,7 +160,11 @@ def api_server_status():
 def api_server_jars():
     """List .jar files available in the configured jars directory."""
     try:
-        jars_path = os.path.abspath(JARS_DIR)
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+    try:
+        jars_path = os.path.join(gdir, JARS_DIR)
         if not os.path.isdir(jars_path):
             return jsonify({"ok": True, "jars": [], "jars_dir": JARS_DIR})
         jars = sorted(f for f in os.listdir(jars_path) if f.endswith(".jar"))
@@ -181,7 +185,12 @@ def api_server_start():
     if not re.match(r'^\d+[MG]$', mem):
         return jsonify({"ok": False, "error": "Invalid memory value — use e.g. 1024M or 2G"}), 400
 
-    jar_path = os.path.abspath(os.path.join(JARS_DIR, jar))
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    jar_path = os.path.join(gdir, JARS_DIR, jar)
     if not os.path.isfile(jar_path):
         return jsonify({"ok": False, "error": f"Jar not found: {jar}"}), 404
 
@@ -232,7 +241,7 @@ def api_download_fabric():
     if not os.path.isfile(script):
         return jsonify({"ok": False, "error": f"Script not found: {script}"}), 404
 
-    cmd = [script, os.path.abspath(JARS_DIR)]
+    cmd = [script, os.path.join(gdir, JARS_DIR)]
     if version:
         cmd.append(version)
 
