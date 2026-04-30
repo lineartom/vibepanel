@@ -37,7 +37,34 @@ def tmux_capture(lines: int = 300) -> str:
 
 
 def tmux_pane_path() -> str:
-    """Return the current working directory of the tmux pane."""
+    """Return the CWD of the foreground process in the tmux pane.
+
+    Uses /proc to find the terminal's foreground process group (tpgid from
+    /proc/<shell_pid>/stat) and resolves /proc/<tpgid>/cwd.  This correctly
+    follows nested shells, manual cd after session creation, etc.
+    Falls back to tmux's #{pane_current_path} on non-Linux hosts.
+    """
+    shell_pid = subprocess.run(
+        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_pid}"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    try:
+        with open(f"/proc/{shell_pid}/stat") as f:
+            stat = f.read()
+        # comm is wrapped in parens and may contain spaces; strip past the last ')'
+        after_comm = stat[stat.rindex(')') + 2:]
+        fields = after_comm.split()
+        # /proc/pid/stat fields (1-indexed per man page):
+        #   3=state 4=ppid 5=pgrp 6=session 7=tty_nr 8=tpgid
+        # after stripping pid+(comm) that's 0-indexed fields[0..5]
+        tpgid = fields[5]
+        if tpgid != "-1":
+            return os.readlink(f"/proc/{tpgid}/cwd")
+    except (FileNotFoundError, OSError, IndexError, ValueError):
+        pass
+
+    # Fallback for non-Linux or missing /proc entry
     result = subprocess.run(
         ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_path}"],
         capture_output=True, text=True, check=True,
