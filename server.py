@@ -255,6 +255,10 @@ def api_download_fabric():
     """Run get-me-fabric.sh to download a Fabric server jar into JARS_DIR."""
     data    = request.get_json(force=True, silent=True) or {}
     version = str(data.get("version", "")).strip()
+    app.logger.debug(f"Requested Fabric download for version: '{version}' ({type(version)})")
+    app.logger.debug(f"Request JSON data: {json.dumps(data)}")
+    if version == "None":
+        version = None
 
     if version and not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.\-]*$', version):
         return jsonify({"ok": False, "error": "Invalid version string"}), 400
