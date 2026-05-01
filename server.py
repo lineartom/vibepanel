@@ -315,12 +315,7 @@ def api_server_start():
     if not os.path.isfile(jar_path):
         return jsonify({"ok": False, "error": f"Jar not found: {jar}"}), 404
 
-    # Guard: don't type a start command into a running server's console.
-    current = subprocess.run(
-        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_command}"],
-        capture_output=True, text=True,
-    )
-    if current.returncode == 0 and current.stdout.strip().lower() == "java":
+    if _is_running():
         return jsonify({"ok": False, "error": "Server is already running"}), 409
 
     cmd = f"java -Xmx{mem} -Xms{mem} -jar {jar_path} nogui"
@@ -347,11 +342,7 @@ def api_server_start():
 @app.route("/api/server/stop", methods=["POST"])
 def api_server_stop():
     """Send the 'stop' command to the Minecraft server console via tmux."""
-    current = subprocess.run(
-        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_command}"],
-        capture_output=True, text=True,
-    )
-    if current.returncode != 0 or current.stdout.strip().lower() != "java":
+    if not _is_running():
         return jsonify({"ok": False, "error": "Server is not running"}), 409
     try:
         tmux_send("stop")
