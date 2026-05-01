@@ -6,6 +6,7 @@ import json
 import argparse
 import shutil
 import subprocess
+import urllib.request
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 
@@ -436,6 +437,37 @@ def api_server_icon():
     if not os.path.isfile(icon):
         return jsonify({"ok": False, "error": "No server-icon.png"}), 404
     return send_file(icon, mimetype="image/png")
+
+
+def _latest_minecraft_version() -> str | None:
+    """Fetch the latest stable Minecraft version from the Fabric meta API."""
+    url = "https://meta.fabricmc.net/v2/versions/game"
+    with urllib.request.urlopen(url, timeout=8) as resp:
+        data = json.loads(resp.read())
+    versions = [
+        v["version"] for v in data
+        if v.get("stable") and "." in v["version"] and "rc" not in v["version"].lower()
+    ]
+    if not versions:
+        return None
+    def _ver_key(s):
+        try:
+            return tuple(int(x) for x in s.split("."))
+        except ValueError:
+            return (0,)
+    return max(versions, key=_ver_key)
+
+
+@app.route("/api/server/latest-minecraft")
+def api_latest_minecraft():
+    """Return the latest stable Minecraft version according to the Fabric meta API."""
+    try:
+        ver = _latest_minecraft_version()
+        if ver:
+            return jsonify({"ok": True, "version": ver})
+        return jsonify({"ok": False, "error": "No stable version found"}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/worlds/list")

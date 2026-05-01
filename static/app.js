@@ -314,7 +314,18 @@ function srvStartPolling() {
   loadServerStatus();
   loadJars();
   loadServerIdentity();
+  loadLatestMinecraft();
   srvPollTimer = setInterval(loadServerStatus, 5000);
+}
+
+async function loadLatestMinecraft() {
+  try {
+    const res  = await fetch('/api/server/latest-minecraft');
+    const data = await res.json();
+    if (data.ok && data.version) {
+      $('fabric-version').placeholder = `e.g. ${data.version}`;
+    }
+  } catch (_) {}
 }
 
 async function loadServerIdentity() {
@@ -450,6 +461,7 @@ $('btn-srv-refresh').addEventListener('click', () => {
   loadServerStatus();
   loadJars();
   loadServerIdentity();
+  loadLatestMinecraft();
 });
 
 // ── Download Fabric ───────────────────────────────────────
