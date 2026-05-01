@@ -463,6 +463,77 @@ a { text-decoration: none; color: inherit; }
 }
 .dl-output.error { color: var(--red); border-color: var(--red); }
 
+/* ── Worlds page ────────────────────────────────────────── */
+#page-worlds { overflow-y: auto; }
+
+.save-name-row {
+  display: flex;
+  gap: .6rem;
+  align-items: center;
+}
+
+.worlds-op-feedback {
+  font-size: .85rem;
+  min-height: 1.2em;
+}
+.worlds-op-feedback.fb-ok    { color: var(--green); }
+.worlds-op-feedback.fb-error { color: var(--red); }
+
+.worlds-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: .5rem;
+  flex-shrink: 0;
+}
+.worlds-total { font-size: .85rem; color: var(--text2); }
+
+.worlds-list {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.world-item {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: .7rem 1rem;
+  border-bottom: 1px solid var(--border);
+  transition: background .1s;
+}
+.world-item:last-child { border-bottom: none; }
+.world-item:hover { background: var(--bg2); }
+.world-item-info { flex: 1; min-width: 0; }
+.world-item-date {
+  font-size: .85rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.world-item-label {
+  font-size: .78rem;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.world-item-label.autosave { color: var(--blue); }
+.world-item-right {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  flex-shrink: 0;
+}
+.world-item-size {
+  font-size: .8rem;
+  color: var(--text3);
+  min-width: 4.5rem;
+  text-align: right;
+}
+.world-item-actions { display: flex; gap: .4rem; }
+
 /* ── Buttons ────────────────────────────────────────────── */
 .btn {
   display: inline-flex; align-items: center; gap: .4rem;
@@ -482,6 +553,15 @@ a { text-decoration: none; color: inherit; }
   border: 1px solid var(--border);
 }
 .btn-ghost:hover:not(:disabled) { background: var(--bg3); }
+
+.btn-danger {
+  background: rgba(248,81,73,.1);
+  color: var(--red);
+  border: 1px solid rgba(248,81,73,.25);
+}
+.btn-danger:hover:not(:disabled) { background: rgba(248,81,73,.2); }
+
+.btn-sm { padding: .3rem .65rem; font-size: .8rem; }
 
 /* ── Responsive ─────────────────────────────────────────── */
 @media (max-width: 700px) {

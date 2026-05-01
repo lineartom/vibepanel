@@ -4,7 +4,9 @@ import re
 import time
 import json
 import argparse
+import shutil
 import subprocess
+from datetime import datetime
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
 
 app = Flask(__name__)
@@ -12,6 +14,7 @@ app = Flask(__name__)
 TMUX_TARGET = os.environ.get("TMUX_TARGET", "minecraft")
 JARS_DIR    = os.environ.get("JARS_DIR", "server-jars")
 SERVER_DIR  = os.environ.get("SERVER_DIR", "")
+WORLDS_DIR  = os.environ.get("WORLDS_DIR", "world-saves")
 
 _ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _MC_FMT = re.compile(r'§[0-9a-fklmnorABCDEFKLMNOR]')
@@ -70,6 +73,18 @@ def tmux_pane_path() -> str:
         capture_output=True, text=True, check=True,
     )
     return result.stdout.strip()
+
+
+_WORLD_SAVE_RE = re.compile(r'^world-\d{8}-\d{6}(?:-[a-zA-Z0-9_-]+)?\.tgz$')
+
+
+def _is_running() -> bool:
+    """Return True if a Minecraft server (java) is running in our tmux pane."""
+    result = subprocess.run(
+        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_command}"],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip().lower() == "java"
 
 
 @app.route("/")
@@ -344,6 +359,181 @@ def api_server_icon():
     return send_file(icon, mimetype="image/png")
 
 
+@app.route("/api/worlds/list")
+def api_worlds_list():
+    """List .tgz world saves in WORLDS_DIR with per-file and total sizes."""
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    saves_path = os.path.join(gdir, WORLDS_DIR)
+    if not os.path.isdir(saves_path):
+        return jsonify({"ok": True, "saves": [], "total_bytes": 0})
+
+    try:
+        saves = []
+        total = 0
+        for f in sorted(
+            (f for f in os.listdir(saves_path) if f.endswith(".tgz")),
+            reverse=True,
+        ):
+            fp   = os.path.join(saves_path, f)
+            size = os.path.getsize(fp)
+            total += size
+            saves.append({"name": f, "size": size})
+        return jsonify({"ok": True, "saves": saves, "total_bytes": total})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/worlds/save", methods=["POST"])
+def api_worlds_save():
+    """Tar the 'world' directory into a timestamped archive in WORLDS_DIR."""
+    if _is_running():
+        return jsonify({"ok": False, "error": "Server must be stopped before saving a world"}), 409
+
+    data = request.get_json(force=True, silent=True) or {}
+    name = re.sub(r'[^a-zA-Z0-9_-]', '', str(data.get("name", "")).strip())[:50]
+
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    world_path = os.path.join(gdir, "world")
+    if not os.path.isdir(world_path):
+        return jsonify({"ok": False, "error": "No 'world' directory found"}), 404
+
+    saves_path = os.path.join(gdir, WORLDS_DIR)
+    os.makedirs(saves_path, exist_ok=True)
+
+    ts       = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"world-{ts}-{name}.tgz" if name else f"world-{ts}.tgz"
+    out_path = os.path.join(saves_path, filename)
+
+    try:
+        subprocess.run(
+            ["tar", "-czf", out_path, "-C", gdir, "world"],
+            check=True, capture_output=True, text=True,
+        )
+        return jsonify({"ok": True, "filename": filename, "size": os.path.getsize(out_path)})
+    except subprocess.CalledProcessError as e:
+        return jsonify({"ok": False, "error": e.stderr or str(e)}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/worlds/load", methods=["POST"])
+def api_worlds_load():
+    """Autosave current world, delete it, then extract the selected archive."""
+    if _is_running():
+        return jsonify({"ok": False, "error": "Server must be stopped before loading a world"}), 409
+
+    data     = request.get_json(force=True, silent=True) or {}
+    filename = str(data.get("filename", "")).strip()
+
+    if not _WORLD_SAVE_RE.match(filename):
+        return jsonify({"ok": False, "error": "Invalid filename"}), 400
+
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    saves_path   = os.path.join(gdir, WORLDS_DIR)
+    archive_path = os.path.join(saves_path, filename)
+    if not os.path.isfile(archive_path):
+        return jsonify({"ok": False, "error": f"Save not found: {filename}"}), 404
+
+    world_path = os.path.join(gdir, "world")
+    autosaved  = None
+
+    if os.path.isdir(world_path):
+        os.makedirs(saves_path, exist_ok=True)
+        ts        = datetime.now().strftime("%Y%m%d-%H%M%S")
+        autosaved = f"world-{ts}-autosave.tgz"
+        auto_path = os.path.join(saves_path, autosaved)
+        try:
+            subprocess.run(
+                ["tar", "-czf", auto_path, "-C", gdir, "world"],
+                check=True, capture_output=True, text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            return jsonify({"ok": False, "error": f"Autosave failed: {e.stderr or str(e)}"}), 500
+        try:
+            shutil.rmtree(world_path)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Failed to remove current world: {e}"}), 500
+
+    try:
+        subprocess.run(
+            ["tar", "-xzf", archive_path, "-C", gdir],
+            check=True, capture_output=True, text=True,
+        )
+        return jsonify({"ok": True, "autosaved": autosaved})
+    except subprocess.CalledProcessError as e:
+        return jsonify({
+            "ok":        False,
+            "error":     f"Extract failed: {e.stderr or str(e)}",
+            "autosaved": autosaved,
+        }), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "autosaved": autosaved}), 500
+
+
+@app.route("/api/worlds/delete", methods=["POST"])
+def api_worlds_delete():
+    """Delete a single world save archive."""
+    data     = request.get_json(force=True, silent=True) or {}
+    filename = str(data.get("filename", "")).strip()
+
+    if not _WORLD_SAVE_RE.match(filename):
+        return jsonify({"ok": False, "error": "Invalid filename"}), 400
+
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    file_path = os.path.join(gdir, WORLDS_DIR, filename)
+    if not os.path.isfile(file_path):
+        return jsonify({"ok": False, "error": "File not found"}), 404
+
+    try:
+        os.remove(file_path)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/worlds/delete-autosaves", methods=["POST"])
+def api_worlds_delete_autosaves():
+    """Delete all autosave archives from WORLDS_DIR."""
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    saves_path = os.path.join(gdir, WORLDS_DIR)
+    if not os.path.isdir(saves_path):
+        return jsonify({"ok": True, "deleted": 0})
+
+    deleted = 0
+    errors  = []
+    for f in os.listdir(saves_path):
+        if re.match(r'^world-\d{8}-\d{6}-autosave\.tgz$', f):
+            try:
+                os.remove(os.path.join(saves_path, f))
+                deleted += 1
+            except Exception as e:
+                errors.append(str(e))
+
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors), "deleted": deleted}), 500
+    return jsonify({"ok": True, "deleted": deleted})
+
+
 @app.route("/api/console/stream")
 def api_console_stream():
     def generate():
@@ -382,6 +572,8 @@ if __name__ == "__main__":
                         help="path to server-jars directory (default: ./server-jars)")
     parser.add_argument("--server-dir", default=None,
                         help="working directory to cd into before starting the server")
+    parser.add_argument("--worlds-dir", default=None,
+                        help="path to world-saves directory (default: ./world-saves)")
     args = parser.parse_args()
 
     if args.session:
@@ -390,6 +582,8 @@ if __name__ == "__main__":
         JARS_DIR = args.jars_dir
     if args.server_dir:
         SERVER_DIR = args.server_dir
+    if args.worlds_dir:
+        WORLDS_DIR = args.worlds_dir
 
     print(f"VibePanel starting on http://{args.host}:{args.port}  "
           f"(tmux: {TMUX_TARGET}, jars: {JARS_DIR})")
