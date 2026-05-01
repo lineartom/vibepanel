@@ -50,6 +50,7 @@ function navigate(page) {
   if (page === 'players') fetchServerRunning().then(() => { if (serverRunning !== false) loadPlayers(); });
   if (page === 'say')     fetchServerRunning();
   if (page === 'server')  srvStartPolling();
+  if (page === 'mods')    { fetchServerRunning(); loadMods(); }
   if (page === 'worlds')  { fetchServerRunning(); loadWorlds(); }
 }
 
@@ -292,6 +293,10 @@ function applyServerRunningState() {
   $('btn-say').disabled   = offline;
   $('say-offline-note').hidden = !offline;
 
+  // Mods: move disabled while server is running
+  $('mods-running-note').hidden = !running;
+  document.querySelectorAll('.btn-mod-move').forEach(btn => { btn.disabled = running; });
+
   // Worlds: save and load disabled while server is running
   const running = serverRunning === true;
   $('worlds-running-note').hidden = !running;
@@ -522,6 +527,144 @@ $('btn-start').addEventListener('click', async () => {
   }
   btn.textContent = '▶ Start Server';
 });
+
+// ── Mods ─────────────────────────────────────────────────
+
+async function loadMods() {
+  $('mods-active-list').innerHTML   = '<p class="hint">Loading&hellip;</p>';
+  $('mods-inactive-list').innerHTML = '<p class="hint">Loading&hellip;</p>';
+  $('mods-active-count').textContent   = '';
+  $('mods-inactive-count').textContent = '';
+
+  try {
+    const res  = await fetch('/api/mods/list');
+    const data = await res.json();
+    renderModsList(data);
+  } catch (err) {
+    const msg = `<p class="hint">Error: ${esc(err.message)}</p>`;
+    $('mods-active-list').innerHTML   = msg;
+    $('mods-inactive-list').innerHTML = msg;
+  }
+}
+
+function renderModsList(data) {
+  if (!data.ok) {
+    const msg = `<p class="hint">Error: ${esc(data.error)}</p>`;
+    $('mods-active-list').innerHTML   = msg;
+    $('mods-inactive-list').innerHTML = msg;
+    return;
+  }
+
+  const running = serverRunning === true;
+  renderModsColumn($('mods-active-list'),   data.active,   'deactivate', running);
+  renderModsColumn($('mods-inactive-list'), data.inactive, 'activate',   running);
+  $('mods-active-count').textContent   = `(${data.active.length})`;
+  $('mods-inactive-count').textContent = `(${data.inactive.length})`;
+}
+
+function renderModsColumn(container, mods, action, running) {
+  if (mods.length === 0) {
+    container.innerHTML = '<p class="hint">None.</p>';
+    return;
+  }
+
+  const btnLabel = action === 'activate' ? 'Activate' : 'Deactivate';
+  const btnClass = action === 'activate' ? 'btn-primary' : 'btn-ghost';
+
+  let html = '<div class="mods-list">';
+  mods.forEach(mod => {
+    html += `
+      <div class="mod-item">
+        <div class="mod-item-info">
+          <div class="mod-item-name">${esc(mod.name)}</div>
+          <div class="mod-item-size">${fmtBytes(mod.size)}</div>
+        </div>
+        <button class="btn ${btnClass} btn-sm btn-mod-move"
+                data-filename="${esc(mod.name)}"
+                data-action="${action}"
+                ${running ? 'disabled' : ''}>${btnLabel}</button>
+      </div>`;
+  });
+  html += '</div>';
+  container.innerHTML = html;
+
+  container.querySelectorAll('.btn-mod-move').forEach(btn => {
+    btn.addEventListener('click', () => moveMod(btn.dataset.filename, btn.dataset.action));
+  });
+}
+
+async function moveMod(filename, action) {
+  const endpoint = action === 'activate' ? '/api/mods/activate' : '/api/mods/deactivate';
+  const opFb     = $('mods-op-feedback');
+  opFb.textContent = '';
+  opFb.className   = '';
+
+  document.querySelectorAll('.btn-mod-move').forEach(b => { b.disabled = true; });
+
+  try {
+    const res  = await fetch(endpoint, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ filename }),
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      loadMods();
+      return;
+    }
+
+    if (data.conflict) {
+      opFb.innerHTML = `
+        <div class="conflict-notice">
+          <span>&#x26A0;&#xFE0F; <strong>${esc(filename)}</strong> exists in both directories
+          with different content. Remove one version manually, or:</span>
+          <button class="btn btn-danger btn-sm" id="btn-delete-conflict"
+                  data-filename="${esc(filename)}">Delete Both</button>
+        </div>`;
+      $('btn-delete-conflict').addEventListener('click', e => {
+        deleteBothConflict(e.currentTarget.dataset.filename);
+      });
+    } else {
+      opFb.textContent = `Error: ${data.error}`;
+      opFb.className   = 'fb-error';
+      loadMods();
+    }
+  } catch (err) {
+    opFb.textContent = `Network error: ${err.message}`;
+    opFb.className   = 'fb-error';
+    loadMods();
+  }
+}
+
+async function deleteBothConflict(filename) {
+  if (!confirm(`Delete both copies of "${filename}"?\n\nThis cannot be undone.`)) return;
+
+  const opFb = $('mods-op-feedback');
+
+  try {
+    const res  = await fetch('/api/mods/delete', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ filename, location: 'both' }),
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      opFb.textContent = '';
+      opFb.className   = '';
+    } else {
+      opFb.textContent = `Error: ${data.error}`;
+      opFb.className   = 'fb-error';
+    }
+  } catch (err) {
+    opFb.textContent = `Network error: ${err.message}`;
+    opFb.className   = 'fb-error';
+  }
+  loadMods();
+}
+
+$('btn-mods-refresh').addEventListener('click', loadMods);
 
 // ── Worlds ───────────────────────────────────────────────
 

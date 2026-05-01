@@ -15,6 +15,8 @@ TMUX_TARGET = os.environ.get("TMUX_TARGET", "minecraft")
 JARS_DIR    = os.environ.get("JARS_DIR", "server-jars")
 SERVER_DIR  = os.environ.get("SERVER_DIR", "")
 WORLDS_DIR  = os.environ.get("WORLDS_DIR", "world-saves")
+MODS_DIR    = os.environ.get("MODS_DIR", "mods")
+MODS_SAVES_DIR = os.environ.get("MODS_SAVES_DIR", "mods-saves")
 
 _ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _MC_FMT = re.compile(r'§[0-9a-fklmnorABCDEFKLMNOR]')
@@ -85,6 +87,60 @@ def _is_running() -> bool:
         capture_output=True, text=True,
     )
     return result.returncode == 0 and result.stdout.strip().lower() == "java"
+
+
+_MOD_FILE_RE = re.compile(r'^[^\x00/\\]+\.(jar|zip)$', re.IGNORECASE)
+
+
+def _validate_mod_filename(filename: str) -> bool:
+    return bool(_MOD_FILE_RE.match(filename))
+
+
+def _files_identical(path1: str, path2: str) -> bool:
+    """Compare two files byte-for-byte; returns False immediately on size mismatch."""
+    if os.path.getsize(path1) != os.path.getsize(path2):
+        return False
+    with open(path1, 'rb') as f1, open(path2, 'rb') as f2:
+        while True:
+            b1, b2 = f1.read(65536), f2.read(65536)
+            if b1 != b2:
+                return False
+            if not b1:
+                return True
+
+
+def _do_mod_move(src_dir: str, dst_dir: str, filename: str):
+    """Move filename from src_dir to dst_dir, coalescing identical duplicates.
+
+    Returns a Flask response.  If a non-identical file already exists at dst,
+    returns 409 with conflict=True so the caller can surface a Delete Both option.
+    """
+    src = os.path.join(src_dir, filename)
+    dst = os.path.join(dst_dir, filename)
+
+    if not os.path.isfile(src):
+        return jsonify({"ok": False, "error": "File not found"}), 404
+
+    if os.path.isfile(dst):
+        try:
+            same = _files_identical(src, dst)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Could not compare files: {e}"}), 500
+        if same:
+            os.remove(src)
+            return jsonify({"ok": True, "coalesced": True})
+        return jsonify({
+            "ok":      False,
+            "conflict": True,
+            "error": (
+                f"'{filename}' already exists at the destination with different content. "
+                "Remove one version manually, or delete both here."
+            ),
+        }), 409
+
+    os.makedirs(dst_dir, exist_ok=True)
+    shutil.move(src, dst)
+    return jsonify({"ok": True})
 
 
 @app.route("/")
@@ -534,6 +590,114 @@ def api_worlds_delete_autosaves():
     return jsonify({"ok": True, "deleted": deleted})
 
 
+@app.route("/api/mods/list")
+def api_mods_list():
+    """List active (mods/) and inactive (mods-saves/) mod files with sizes."""
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    def _scan(path):
+        if not os.path.isdir(path):
+            return []
+        entries = []
+        for f in sorted(os.listdir(path), key=str.lower):
+            if _MOD_FILE_RE.match(f):
+                try:
+                    entries.append({"name": f, "size": os.path.getsize(os.path.join(path, f))})
+                except OSError:
+                    pass
+        return entries
+
+    try:
+        return jsonify({
+            "ok":       True,
+            "active":   _scan(os.path.join(gdir, MODS_DIR)),
+            "inactive": _scan(os.path.join(gdir, MODS_SAVES_DIR)),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/mods/activate", methods=["POST"])
+def api_mods_activate():
+    """Move a mod from mods-saves/ into mods/."""
+    if _is_running():
+        return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
+    data     = request.get_json(force=True, silent=True) or {}
+    filename = str(data.get("filename", "")).strip()
+    if not _validate_mod_filename(filename):
+        return jsonify({"ok": False, "error": "Invalid filename"}), 400
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+    return _do_mod_move(
+        os.path.join(gdir, MODS_SAVES_DIR),
+        os.path.join(gdir, MODS_DIR),
+        filename,
+    )
+
+
+@app.route("/api/mods/deactivate", methods=["POST"])
+def api_mods_deactivate():
+    """Move a mod from mods/ into mods-saves/."""
+    if _is_running():
+        return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
+    data     = request.get_json(force=True, silent=True) or {}
+    filename = str(data.get("filename", "")).strip()
+    if not _validate_mod_filename(filename):
+        return jsonify({"ok": False, "error": "Invalid filename"}), 400
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+    return _do_mod_move(
+        os.path.join(gdir, MODS_DIR),
+        os.path.join(gdir, MODS_SAVES_DIR),
+        filename,
+    )
+
+
+@app.route("/api/mods/delete", methods=["POST"])
+def api_mods_delete():
+    """Delete a mod from 'active', 'inactive', or 'both' locations."""
+    data     = request.get_json(force=True, silent=True) or {}
+    filename = str(data.get("filename", "")).strip()
+    location = str(data.get("location", "")).strip()
+
+    if not _validate_mod_filename(filename):
+        return jsonify({"ok": False, "error": "Invalid filename"}), 400
+    if location not in ("active", "inactive", "both"):
+        return jsonify({"ok": False, "error": "Invalid location"}), 400
+
+    try:
+        gdir = tmux_pane_path()
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+
+    targets = []
+    if location in ("active", "both"):
+        targets.append(os.path.join(gdir, MODS_DIR, filename))
+    if location in ("inactive", "both"):
+        targets.append(os.path.join(gdir, MODS_SAVES_DIR, filename))
+
+    errors  = []
+    deleted = 0
+    for path in targets:
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                deleted += 1
+            except Exception as e:
+                errors.append(str(e))
+
+    if errors:
+        return jsonify({"ok": False, "error": "; ".join(errors), "deleted": deleted}), 500
+    return jsonify({"ok": True, "deleted": deleted})
+
+
 @app.route("/api/console/stream")
 def api_console_stream():
     def generate():
@@ -574,6 +738,10 @@ if __name__ == "__main__":
                         help="working directory to cd into before starting the server")
     parser.add_argument("--worlds-dir", default=None,
                         help="path to world-saves directory (default: ./world-saves)")
+    parser.add_argument("--mods-dir", default=None,
+                        help="path to active mods directory (default: ./mods)")
+    parser.add_argument("--mods-saves-dir", default=None,
+                        help="path to inactive mods directory (default: ./mods-saves)")
     args = parser.parse_args()
 
     if args.session:
@@ -584,6 +752,10 @@ if __name__ == "__main__":
         SERVER_DIR = args.server_dir
     if args.worlds_dir:
         WORLDS_DIR = args.worlds_dir
+    if args.mods_dir:
+        MODS_DIR = args.mods_dir
+    if args.mods_saves_dir:
+        MODS_SAVES_DIR = args.mods_saves_dir
 
     print(f"VibePanel starting on http://{args.host}:{args.port}  "
           f"(tmux: {TMUX_TARGET}, jars: {JARS_DIR})")

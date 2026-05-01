@@ -25,6 +25,9 @@
       <a href="#" class="nav-link" data-page="say">
         <span class="nav-icon">&#x1F4AC;</span><span>Say</span>
       </a>
+      <a href="#" class="nav-link" data-page="mods">
+        <span class="nav-icon">&#x1F9E9;</span><span>Mods</span>
+      </a>
       <a href="#" class="nav-link" data-page="worlds">
         <span class="nav-icon">&#x1F30D;</span><span>Worlds</span>
       </a>
@@ -50,6 +53,9 @@
     </a>
     <a href="#" class="nav-link" data-page="say">
       <span class="nav-icon">&#x1F4AC;</span><span>Say</span>
+    </a>
+    <a href="#" class="nav-link" data-page="mods">
+      <span class="nav-icon">&#x1F9E9;</span><span>Mods</span>
     </a>
     <a href="#" class="nav-link" data-page="worlds">
       <span class="nav-icon">&#x1F30D;</span><span>Worlds</span>
@@ -103,6 +109,29 @@
       <div id="say-history-wrap">
         <h2 class="section-title">Sent</h2>
         <div id="say-history"></div>
+      </div>
+    </section>
+
+    <!-- Mods -->
+    <section id="page-mods" class="page">
+      <header class="page-header">
+        <h1>Mods</h1>
+        <button id="btn-mods-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+      </header>
+
+      <p id="mods-running-note" class="offline-note" hidden>Stop the server before changing mods.</p>
+
+      <div id="mods-op-feedback" aria-live="polite"></div>
+
+      <div class="mods-columns">
+        <div class="mods-col">
+          <h2 class="section-title">Active <span id="mods-active-count" class="mod-count"></span></h2>
+          <div id="mods-active-list"><p class="hint">Loading&hellip;</p></div>
+        </div>
+        <div class="mods-col">
+          <h2 class="section-title">Inactive <span id="mods-inactive-count" class="mod-count"></span></h2>
+          <div id="mods-inactive-list"><p class="hint">Loading&hellip;</p></div>
+        </div>
       </div>
     </section>
 

@@ -463,6 +463,80 @@ a { text-decoration: none; color: inherit; }
 }
 .dl-output.error { color: var(--red); border-color: var(--red); }
 
+/* ── Mods page ──────────────────────────────────────────── */
+#page-mods { overflow-y: auto; }
+
+#mods-op-feedback {
+  font-size: .85rem;
+  min-height: 1.2em;
+}
+#mods-op-feedback.fb-error { color: var(--red); }
+
+.mods-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.mods-col {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  min-height: 0;
+}
+
+.mod-count {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text3);
+}
+
+.mods-list {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.mod-item {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  padding: .6rem .9rem;
+  border-bottom: 1px solid var(--border);
+  transition: background .1s;
+}
+.mod-item:last-child { border-bottom: none; }
+.mod-item:hover { background: var(--bg2); }
+.mod-item-info { flex: 1; min-width: 0; }
+.mod-item-name {
+  font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  font-size: .8rem;
+  word-break: break-all;
+}
+.mod-item-size { font-size: .73rem; color: var(--text3); }
+
+.conflict-notice {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  flex-wrap: wrap;
+  padding: .7rem 1rem;
+  background: rgba(248,81,73,.08);
+  border: 1px solid rgba(248,81,73,.3);
+  border-radius: var(--radius);
+  font-size: .85rem;
+}
+.conflict-notice > span { flex: 1; min-width: 0; }
+
+@media (max-width: 700px) {
+  .mods-columns { grid-template-columns: 1fr; }
+  .mods-list { max-height: 280px; }
+}
+
 /* ── Worlds page ────────────────────────────────────────── */
 #page-worlds { overflow-y: auto; }
 
