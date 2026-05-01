@@ -209,45 +209,58 @@ def api_say():
 def api_server_status():
     """Detect whether a Minecraft server process is running inside our tmux pane."""
     try:
-        # Is the foreground process in our pane actually java?
+        # Quick gate: is the pane's foreground command java at all?
         current = subprocess.run(
             ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_command}"],
             capture_output=True, text=True,
         )
-        if current.returncode != 0:
-            return jsonify({"running": False})
-        if current.stdout.strip().lower() != "java":
+        if current.returncode != 0 or current.stdout.strip().lower() != "java":
             return jsonify({"running": False})
 
-        # Get the shell PID that owns this pane, then find its java child.
-        pane_pid = subprocess.run(
+        # Use the same tpgid trick as tmux_pane_path(): read the kernel-maintained
+        # foreground process group ID from /proc/<shell_pid>/stat, then read
+        # /proc/<tpgid>/cmdline.  This finds java however it was launched —
+        # typed directly, run via a wrapper script, or started with exec.
+        shell_pid = subprocess.run(
             ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_pid}"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        children = subprocess.run(
-            ["pgrep", "-P", pane_pid],
-            capture_output=True, text=True,
-        ).stdout.splitlines()
+        jar = None
+        try:
+            with open(f"/proc/{shell_pid}/stat") as f:
+                stat = f.read()
+            after_comm = stat[stat.rindex(')') + 2:]
+            tpgid = after_comm.split()[5]
+            if tpgid != "-1":
+                with open(f"/proc/{tpgid}/cmdline", "rb") as f:
+                    args = f.read().rstrip(b"\x00").split(b"\x00")
+                args = [a.decode("utf-8", errors="replace") for a in args]
+                if "-jar" in args:
+                    jar_path = args[args.index("-jar") + 1]
+                    if jar_path.endswith(".jar"):
+                        jar = os.path.basename(jar_path)
+        except (FileNotFoundError, OSError, IndexError, ValueError):
+            # Non-Linux or /proc unavailable — fall back to scanning direct children.
+            children = subprocess.run(
+                ["pgrep", "-P", shell_pid], capture_output=True, text=True,
+            ).stdout.splitlines()
+            for child_pid in children:
+                child_pid = child_pid.strip()
+                if not child_pid:
+                    continue
+                ps_args = subprocess.run(
+                    ["ps", "-ww", "-o", "args=", "-p", child_pid],
+                    capture_output=True, text=True,
+                ).stdout.strip()
+                if "java" not in ps_args:
+                    continue
+                m = re.search(r"-jar\s+(\S+\.jar)", ps_args)
+                if m:
+                    jar = os.path.basename(m.group(1))
+                break
 
-        for child_pid in children:
-            child_pid = child_pid.strip()
-            if not child_pid:
-                continue
-            args = subprocess.run(
-                ["ps", "-ww", "-o", "args=", "-p", child_pid],
-                capture_output=True, text=True,
-            ).stdout.strip()
-            if "java" not in args:
-                continue
-            m = re.search(r"-jar\s+(\S+\.jar)", args)
-            return jsonify({
-                "running": True,
-                "jar": os.path.basename(m.group(1)) if m else None,
-            })
-
-        # pane_current_command was java but child lookup raced — still running
-        return jsonify({"running": True, "jar": None})
+        return jsonify({"running": True, "jar": jar})
 
     except subprocess.CalledProcessError:
         return jsonify({"running": False})

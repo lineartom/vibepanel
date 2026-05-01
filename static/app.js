@@ -288,6 +288,8 @@ function applyServerRunningState() {
       </div>`;
   }
 
+  const running = serverRunning === true;
+
   // Say: disable inputs and show notice
   $('say-input').disabled = offline;
   $('btn-say').disabled   = offline;
@@ -298,7 +300,6 @@ function applyServerRunningState() {
   document.querySelectorAll('.btn-mod-move').forEach(btn => { btn.disabled = running; });
 
   // Worlds: save and load disabled while server is running
-  const running = serverRunning === true;
   $('worlds-running-note').hidden = !running;
   $('btn-world-save').disabled = running;
   document.querySelectorAll('.btn-world-load').forEach(btn => { btn.disabled = running; });
