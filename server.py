@@ -321,6 +321,22 @@ def api_server_start():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/server/stop", methods=["POST"])
+def api_server_stop():
+    """Send the 'stop' command to the Minecraft server console via tmux."""
+    current = subprocess.run(
+        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_command}"],
+        capture_output=True, text=True,
+    )
+    if current.returncode != 0 or current.stdout.strip().lower() != "java":
+        return jsonify({"ok": False, "error": "Server is not running"}), 409
+    try:
+        tmux_send("stop")
+        return jsonify({"ok": True})
+    except subprocess.CalledProcessError as e:
+        return jsonify({"ok": False, "error": str(e)}), 503
+
+
 @app.route("/api/server/download-fabric", methods=["POST"])
 def api_download_fabric():
     """Run get-me-fabric.sh to download a Fabric server jar into JARS_DIR."""

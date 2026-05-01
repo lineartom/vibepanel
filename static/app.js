@@ -373,9 +373,11 @@ async function loadServerStatus() {
       <div class="srv-status-row">
         <span class="srv-dot running"></span>
         <span class="srv-status-label">Running</span>
+        <button id="btn-stop" class="btn btn-danger btn-sm">&#x25A0; Stop</button>
       </div>
       ${data.jar ? `<div class="srv-jar">${esc(data.jar)}</div>` : ''}`;
     $('srv-start-section').hidden = true;
+    $('btn-stop').addEventListener('click', stopServer);
   } else {
     card.innerHTML = `
       <div class="srv-status-row">
@@ -385,6 +387,17 @@ async function loadServerStatus() {
     $('srv-start-section').hidden = false;
     $('btn-start').disabled = !selectedJar;
   }
+}
+
+async function stopServer() {
+  const btn = $('btn-stop');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Stopping…';
+  try {
+    await fetch('/api/server/stop', { method: 'POST' });
+  } catch (_) { /* poll will surface any error */ }
+  setTimeout(loadServerStatus, 2000);
 }
 
 async function loadJars() {
