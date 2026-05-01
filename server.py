@@ -357,7 +357,14 @@ def api_download_fabric():
 
     script = os.path.join(gdir, "get-me-fabric.sh")
     if not os.path.isfile(script):
-        return jsonify({"ok": False, "error": f"Script not found: {script}"}), 404
+        bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), "get-me-fabric.sh")
+        if not os.path.isfile(bundled):
+            return jsonify({"ok": False, "error": f"Script not found: {script}"}), 404
+        try:
+            shutil.copy2(bundled, script)
+            os.chmod(script, 0o755)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Could not install get-me-fabric.sh: {e}"}), 500
 
     cmd = [script, os.path.join(gdir, JARS_DIR)]
     if version:
