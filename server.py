@@ -90,6 +90,32 @@ def _is_running() -> bool:
     return result.returncode == 0 and result.stdout.strip().lower() == "java"
 
 
+def _resolve_tmux_target(target: str) -> str:
+    """Return target if it exists; if not and exactly one session is visible, use that."""
+    # has-session operates on the session name only, not window/pane suffixes.
+    session_name = target.split(":")[0]
+    exists = subprocess.run(
+        ["tmux", "has-session", "-t", session_name],
+        capture_output=True,
+    ).returncode == 0
+    if exists:
+        return target
+
+    ls = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True, text=True,
+    )
+    if ls.returncode != 0:
+        return target  # no tmux server running yet; keep configured value
+
+    sessions = [s.strip() for s in ls.stdout.splitlines() if s.strip()]
+    if len(sessions) == 1:
+        print(f"tmux target '{target}' not found; attaching to sole session '{sessions[0]}'")
+        return sessions[0]
+
+    return target
+
+
 _MOD_FILE_RE = re.compile(r'^[^\x00/\\]+\.(jar|zip)$', re.IGNORECASE)
 
 
@@ -824,6 +850,8 @@ if __name__ == "__main__":
         MODS_DIR = args.mods_dir
     if args.mods_saves_dir:
         MODS_SAVES_DIR = args.mods_saves_dir
+
+    TMUX_TARGET = _resolve_tmux_target(TMUX_TARGET)
 
     print(f"VibePanel starting on http://{args.host}:{args.port}  "
           f"(tmux: {TMUX_TARGET}, jars: {JARS_DIR})")
