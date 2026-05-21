@@ -637,6 +637,39 @@ a { text-decoration: none; color: inherit; }
 
 .btn-sm { padding: .3rem .65rem; font-size: .8rem; }
 
+/* ── Session tabs ───────────────────────────────────────── */
+#session-tabs {
+  display: flex;
+  gap: 4px;
+  padding: .5rem 1.5rem .35rem;
+  overflow-x: auto;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+#session-tabs::-webkit-scrollbar { display: none; }
+
+.session-tab {
+  padding: .3rem .85rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg1);
+  color: var(--text2);
+  font-size: .85rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.session-tab:hover { background: var(--bg2); color: var(--text); }
+.session-tab.active {
+  background: var(--green-bg);
+  color: var(--green);
+  border-color: rgba(63,185,80,.4);
+}
+
 /* ── Responsive ─────────────────────────────────────────── */
 @media (max-width: 700px) {
   #sidebar    { display: none; }
@@ -647,6 +680,7 @@ a { text-decoration: none; color: inherit; }
     height: calc(100vh - var(--bnav-h));
   }
 
+  #session-tabs { padding: .4rem .75rem .3rem; }
   .page { padding: .9rem 1rem; }
   .terminal { font-size: .74rem; }
 }

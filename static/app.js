@@ -12,8 +12,6 @@ function esc(s) {
 
 function $(id) { return document.getElementById(id); }
 
-// ── Utilities (continued) ────────────────────────────────
-
 function fmtBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
@@ -26,6 +24,68 @@ function parseWorldSave(filename) {
   if (!m) return { dateStr: filename, label: null, isAutosave: false };
   const dt = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
   return { dateStr: dt.toLocaleString(), label: m[7] || null, isAutosave: m[7] === 'autosave' };
+}
+
+// ── Sessions ─────────────────────────────────────────────
+
+let sessions       = [];
+let currentSession = '';
+
+// Appends ?s=<session> to API paths when multiple sessions are configured.
+function api(path) {
+  if (sessions.length <= 1) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return path + sep + 's=' + encodeURIComponent(currentSession);
+}
+
+async function loadSessions() {
+  try {
+    const res  = await fetch('/api/sessions');
+    const data = await res.json();
+    sessions       = data.sessions || [];
+    currentSession = sessions[0] || '';
+  } catch (_) {
+    sessions       = [];
+    currentSession = '';
+  }
+  renderSessionTabs();
+}
+
+function renderSessionTabs() {
+  const el = $('session-tabs');
+  if (sessions.length <= 1) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = sessions.map(s => `
+    <button class="session-tab${s === currentSession ? ' active' : ''}"
+            data-session="${esc(s)}">${esc(s)}</button>`).join('');
+  el.querySelectorAll('.session-tab').forEach(btn => {
+    btn.addEventListener('click', () => switchSession(btn.dataset.session));
+  });
+}
+
+function switchSession(name) {
+  if (name === currentSession) return;
+  currentSession = name;
+  renderSessionTabs();
+
+  // Reset per-session UI state
+  serverRunning = null;
+  jarsLoaded    = false;
+  selectedJar   = null;
+
+  reconnectConsole();
+  fetchServerRunning();
+
+  // Reload whatever page is currently visible
+  if (activePage === 'players') {
+    $('players-body').innerHTML = '<p class="hint">Hit Refresh to query the server.</p>';
+  }
+  if (activePage === 'server')  { srvStopPolling(); srvStartPolling(); }
+  if (activePage === 'mods')    loadMods();
+  if (activePage === 'worlds')  loadWorlds();
 }
 
 // ── Navigation ───────────────────────────────────────────
@@ -63,11 +123,11 @@ document.querySelectorAll('.nav-link').forEach(link => {
 
 // ── Console / SSE ────────────────────────────────────────
 
-const consoleOut      = $('console-out');
-const consoleDot      = $('console-conn').querySelector('.conn-dot');
-const consoleText     = $('console-conn-text');
-const sidebarDot      = $('sidebar-status').querySelector('.conn-dot');
-const sidebarText     = $('sidebar-status-text');
+const consoleOut  = $('console-out');
+const consoleDot  = $('console-conn').querySelector('.conn-dot');
+const consoleText = $('console-conn-text');
+const sidebarDot  = $('sidebar-status').querySelector('.conn-dot');
+const sidebarText = $('sidebar-status-text');
 
 function setConnState(state, label) {
   [consoleDot, sidebarDot].forEach(d => {
@@ -77,40 +137,41 @@ function setConnState(state, label) {
   sidebarText.textContent = label;
 }
 
+let consoleEs = null;
+
+function reconnectConsole() {
+  if (consoleEs) { consoleEs.close(); consoleEs = null; }
+  setConnState('', 'Connecting…');
+
+  consoleEs = new EventSource(api('/api/console/stream'));
+
+  consoleEs.onopen = () => setConnState('live', 'Live');
+
+  consoleEs.onmessage = e => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+
+    if (data.error) {
+      setConnState('error', 'Error');
+      return;
+    }
+    if (typeof data.content === 'string') {
+      const atBottom = consoleOut.scrollHeight - consoleOut.clientHeight <= consoleOut.scrollTop + 60;
+      consoleOut.textContent = data.content;
+      if (atBottom) consoleOut.scrollTop = consoleOut.scrollHeight;
+    }
+  };
+
+  consoleEs.onerror = () => {
+    setConnState('error', 'Reconnecting…');
+    consoleEs.close();
+    consoleEs = null;
+    setTimeout(reconnectConsole, 3000);
+  };
+}
+
 function initConsole() {
-  let es;
-
-  function connect() {
-    if (es) es.close();
-    setConnState('', 'Connecting…');
-
-    es = new EventSource('/api/console/stream');
-
-    es.onopen = () => setConnState('live', 'Live');
-
-    es.onmessage = e => {
-      let data;
-      try { data = JSON.parse(e.data); } catch { return; }
-
-      if (data.error) {
-        setConnState('error', 'Error');
-        return;
-      }
-      if (typeof data.content === 'string') {
-        const atBottom = consoleOut.scrollHeight - consoleOut.clientHeight <= consoleOut.scrollTop + 60;
-        consoleOut.textContent = data.content;
-        if (atBottom) consoleOut.scrollTop = consoleOut.scrollHeight;
-      }
-    };
-
-    es.onerror = () => {
-      setConnState('error', 'Reconnecting…');
-      es.close();
-      setTimeout(connect, 3000);
-    };
-  }
-
-  connect();
+  reconnectConsole();
 }
 
 // ── Players ──────────────────────────────────────────────
@@ -127,7 +188,7 @@ async function loadPlayers() {
   playersBody.innerHTML = '<p class="hint">Querying server…</p>';
 
   try {
-    const res  = await fetch('/api/players');
+    const res  = await fetch(api('/api/players'));
     const data = await res.json();
 
     if (!data.ok) {
@@ -212,7 +273,7 @@ async function sendSay() {
   sayFeedback.className = '';
 
   try {
-    const res  = await fetch('/api/say', {
+    const res  = await fetch(api('/api/say'), {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ message: msg }),
@@ -265,7 +326,7 @@ let serverRunning = null;
 
 async function fetchServerRunning() {
   try {
-    const res  = await fetch('/api/server/status');
+    const res  = await fetch(api('/api/server/status'));
     const data = await res.json();
     serverRunning = data.running;
     applyServerRunningState();
@@ -277,6 +338,7 @@ async function fetchServerRunning() {
 
 function applyServerRunningState() {
   const offline = serverRunning === false;
+  const running = serverRunning === true;
 
   // Players: gate Refresh; replace hint with offline message if no real data yet
   $('btn-refresh').disabled = offline;
@@ -287,8 +349,6 @@ function applyServerRunningState() {
         <p>Server is not running.</p>
       </div>`;
   }
-
-  const running = serverRunning === true;
 
   // Say: disable inputs and show notice
   $('say-input').disabled = offline;
@@ -307,9 +367,9 @@ function applyServerRunningState() {
 
 // ── Server ───────────────────────────────────────────────
 
-let srvPollTimer  = null;
-let selectedJar   = null;
-let jarsLoaded    = false;
+let srvPollTimer = null;
+let selectedJar  = null;
+let jarsLoaded   = false;
 
 function srvStartPolling() {
   loadServerStatus();
@@ -321,7 +381,7 @@ function srvStartPolling() {
 
 async function loadLatestMinecraft() {
   try {
-    const res  = await fetch('/api/server/latest-minecraft');
+    const res  = await fetch(api('/api/server/latest-minecraft'));
     const data = await res.json();
     if (data.ok && data.version) {
       $('fabric-version').placeholder = `e.g. ${data.version}`;
@@ -330,12 +390,12 @@ async function loadLatestMinecraft() {
 }
 
 async function loadServerIdentity() {
-  const wrap  = $('srv-identity');
-  const icon  = $('srv-icon');
+  const wrap   = $('srv-identity');
+  const icon   = $('srv-icon');
   const motdEl = $('srv-motd');
 
   try {
-    const res  = await fetch('/api/server/identity');
+    const res  = await fetch(api('/api/server/identity'));
     const data = await res.json();
     if (!data.ok) { wrap.hidden = true; return; }
 
@@ -350,7 +410,8 @@ async function loadServerIdentity() {
 
     icon.hidden = !data.has_icon;
     if (data.has_icon) {
-      icon.src = `/api/server/icon?t=${Date.now()}`;
+      const iconBase = api('/api/server/icon');
+      icon.src = iconBase + (iconBase.includes('?') ? '&' : '?') + `t=${Date.now()}`;
       icon.onerror = () => { icon.hidden = true; };
     }
 
@@ -407,7 +468,7 @@ async function stopServer() {
   btn.disabled = true;
   btn.textContent = 'Stopping…';
   try {
-    await fetch('/api/server/stop', { method: 'POST' });
+    await fetch(api('/api/server/stop'), { method: 'POST' });
   } catch (_) { /* poll will surface any error */ }
   setTimeout(loadServerStatus, 2000);
 }
@@ -416,7 +477,7 @@ async function loadJars() {
   if (jarsLoaded) return;
   const wrap = $('jar-list-wrap');
   try {
-    const res  = await fetch('/api/server/jars');
+    const res  = await fetch(api('/api/server/jars'));
     const data = await res.json();
 
     if (!data.ok) {
@@ -485,7 +546,7 @@ $('btn-download').addEventListener('click', async () => {
   outputWrap.hidden = true;
 
   try {
-    const res  = await fetch('/api/server/download-fabric', {
+    const res  = await fetch(api('/api/server/download-fabric'), {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ version: version || null }),
@@ -530,7 +591,7 @@ $('btn-start').addEventListener('click', async () => {
   feedback.className = '';
 
   try {
-    const res  = await fetch('/api/server/start', {
+    const res  = await fetch(api('/api/server/start'), {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ jar: selectedJar, mem }),
@@ -563,7 +624,7 @@ async function loadMods() {
   $('mods-inactive-count').textContent = '';
 
   try {
-    const res  = await fetch('/api/mods/list');
+    const res  = await fetch(api('/api/mods/list'));
     const data = await res.json();
     renderModsList(data);
   } catch (err) {
@@ -620,8 +681,10 @@ function renderModsColumn(container, mods, action, running) {
 }
 
 async function moveMod(filename, action) {
-  const endpoint = action === 'activate' ? '/api/mods/activate' : '/api/mods/deactivate';
-  const opFb     = $('mods-op-feedback');
+  const endpoint = action === 'activate'
+    ? api('/api/mods/activate')
+    : api('/api/mods/deactivate');
+  const opFb = $('mods-op-feedback');
   opFb.textContent = '';
   opFb.className   = '';
 
@@ -669,7 +732,7 @@ async function deleteBothConflict(filename) {
   const opFb = $('mods-op-feedback');
 
   try {
-    const res  = await fetch('/api/mods/delete', {
+    const res  = await fetch(api('/api/mods/delete'), {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ filename, location: 'both' }),
@@ -698,7 +761,7 @@ async function loadWorlds() {
   const wrap = $('worlds-list-wrap');
   wrap.innerHTML = '<p class="hint">Loading&hellip;</p>';
   try {
-    const res  = await fetch('/api/worlds/list');
+    const res  = await fetch(api('/api/worlds/list'));
     const data = await res.json();
     renderWorldsList(data);
   } catch (err) {
@@ -776,7 +839,7 @@ async function saveWorld() {
   opFb.className   = '';
 
   try {
-    const res  = await fetch('/api/worlds/save', {
+    const res  = await fetch(api('/api/worlds/save'), {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ name: nameInput.value.trim() }),
@@ -812,7 +875,7 @@ async function loadWorld(filename) {
   document.querySelectorAll('.btn-world-load, .btn-world-delete').forEach(b => { b.disabled = true; });
 
   try {
-    const res  = await fetch('/api/worlds/load', {
+    const res  = await fetch(api('/api/worlds/load'), {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ filename }),
@@ -842,7 +905,7 @@ async function deleteWorld(filename) {
   opFb.className   = '';
 
   try {
-    const res  = await fetch('/api/worlds/delete', {
+    const res  = await fetch(api('/api/worlds/delete'), {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ filename }),
@@ -868,7 +931,7 @@ async function deleteAutosaves() {
   opFb.className   = '';
 
   try {
-    const res  = await fetch('/api/worlds/delete-autosaves', {
+    const res  = await fetch(api('/api/worlds/delete-autosaves'), {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
     });
@@ -894,7 +957,10 @@ $('btn-world-save').addEventListener('click', saveWorld);
 
 // ── Boot ─────────────────────────────────────────────────
 
-renderHistory();
-initConsole();
-fetchServerRunning();
-setInterval(fetchServerRunning, 15000);
+(async () => {
+  renderHistory();
+  await loadSessions();
+  initConsole();
+  fetchServerRunning();
+  setInterval(fetchServerRunning, 15000);
+})();

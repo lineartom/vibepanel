@@ -8,18 +8,19 @@ import shutil
 import subprocess
 import urllib.request
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file, abort
 
 app = Flask(__name__)
 
-TMUX_TARGET = os.environ.get("TMUX_TARGET", "minecraft")
-JARS_DIR    = os.environ.get("JARS_DIR", "server-jars")
-SERVER_DIR  = os.environ.get("SERVER_DIR", "")
-WORLDS_DIR  = os.environ.get("WORLDS_DIR", "world-saves")
-MODS_DIR    = os.environ.get("MODS_DIR", "mods")
+TMUX_TARGET    = os.environ.get("TMUX_TARGET", "minecraft")
+SESSIONS       = [TMUX_TARGET]   # replaced in __main__; kept as list for route helpers
+JARS_DIR       = os.environ.get("JARS_DIR", "server-jars")
+SERVER_DIR     = os.environ.get("SERVER_DIR", "")
+WORLDS_DIR     = os.environ.get("WORLDS_DIR", "world-saves")
+MODS_DIR       = os.environ.get("MODS_DIR", "mods")
 MODS_SAVES_DIR = os.environ.get("MODS_SAVES_DIR", "mods-saves")
 
-_ANSI = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+_ANSI   = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _MC_FMT = re.compile(r'§[0-9a-fklmnorABCDEFKLMNOR]')
 
 
@@ -27,22 +28,22 @@ def clean(text: str) -> str:
     return _MC_FMT.sub('', _ANSI.sub('', text))
 
 
-def tmux_send(command: str) -> None:
+def tmux_send(command: str, target: str = None) -> None:
     subprocess.run(
-        ["tmux", "send-keys", "-t", TMUX_TARGET, command, "Enter"],
+        ["tmux", "send-keys", "-t", target or TMUX_TARGET, command, "Enter"],
         check=True, capture_output=True,
     )
 
 
-def tmux_capture(lines: int = 300) -> str:
+def tmux_capture(lines: int = 300, target: str = None) -> str:
     result = subprocess.run(
-        ["tmux", "capture-pane", "-p", "-t", TMUX_TARGET, "-S", f"-{lines}"],
+        ["tmux", "capture-pane", "-p", "-t", target or TMUX_TARGET, "-S", f"-{lines}"],
         capture_output=True, text=True, check=True,
     )
     return clean(result.stdout)
 
 
-def tmux_pane_path() -> str:
+def tmux_pane_path(target: str = None) -> str:
     """Return the CWD of the foreground process in the tmux pane.
 
     Uses /proc to find the terminal's foreground process group (tpgid from
@@ -50,8 +51,9 @@ def tmux_pane_path() -> str:
     follows nested shells, manual cd after session creation, etc.
     Falls back to tmux's #{pane_current_path} on non-Linux hosts.
     """
+    t = target or TMUX_TARGET
     shell_pid = subprocess.run(
-        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_pid}"],
+        ["tmux", "display-message", "-t", t, "-p", "#{pane_pid}"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
@@ -72,7 +74,7 @@ def tmux_pane_path() -> str:
 
     # Fallback for non-Linux or missing /proc entry
     result = subprocess.run(
-        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_current_path}"],
+        ["tmux", "display-message", "-t", t, "-p", "#{pane_current_path}"],
         capture_output=True, text=True, check=True,
     )
     return result.stdout.strip()
@@ -81,7 +83,7 @@ def tmux_pane_path() -> str:
 _WORLD_SAVE_RE = re.compile(r'^world-\d{8}-\d{6}(?:-[a-zA-Z0-9_-]+)?\.tgz$')
 
 
-def _pane_java_info() -> dict:
+def _pane_java_info(target: str = None) -> dict:
     """Scan the pane's tty for a java process; returns {"running": bool, "jar": str|None}.
 
     Uses #{pane_tty} + ps -t so it finds java regardless of how it was started:
@@ -91,8 +93,9 @@ def _pane_java_info() -> dict:
 
     Raises subprocess.CalledProcessError if the tmux target is unreachable.
     """
+    t = target or TMUX_TARGET
     pane_tty = subprocess.run(
-        ["tmux", "display-message", "-t", TMUX_TARGET, "-p", "#{pane_tty}"],
+        ["tmux", "display-message", "-t", t, "-p", "#{pane_tty}"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     if not pane_tty:
@@ -117,10 +120,10 @@ def _pane_java_info() -> dict:
     return {"running": False, "jar": None}
 
 
-def _is_running() -> bool:
+def _is_running(target: str = None) -> bool:
     """Return True if a Minecraft server (java) is running in our tmux pane."""
     try:
-        return _pane_java_info()["running"]
+        return _pane_java_info(target)["running"]
     except Exception:
         return False
 
@@ -149,6 +152,16 @@ def _resolve_tmux_target(target: str) -> str:
         return sessions[0]
 
     return target
+
+
+def _session_target() -> str:
+    """Return the tmux target for the current request, validated against SESSIONS."""
+    name = request.args.get('s', '').strip()
+    if len(SESSIONS) == 1 or not name:
+        return SESSIONS[0]
+    if name not in SESSIONS:
+        abort(400, description=f"Unknown session: {name}")
+    return name
 
 
 _MOD_FILE_RE = re.compile(r'^[^\x00/\\]+\.(jar|zip)$', re.IGNORECASE)
@@ -192,7 +205,7 @@ def _do_mod_move(src_dir: str, dst_dir: str, filename: str):
             os.remove(src)
             return jsonify({"ok": True, "coalesced": True})
         return jsonify({
-            "ok":      False,
+            "ok":       False,
             "conflict": True,
             "error": (
                 f"'{filename}' already exists at the destination with different content. "
@@ -210,21 +223,28 @@ def index():
     return render_template("index.html", tmux_target=TMUX_TARGET)
 
 
+@app.route("/api/sessions")
+def api_sessions():
+    return jsonify({"sessions": SESSIONS})
+
+
 @app.route("/api/status")
 def api_status():
+    target = _session_target()
     try:
-        tmux_capture(1)
-        return jsonify({"ok": True, "target": TMUX_TARGET})
+        tmux_capture(1, target)
+        return jsonify({"ok": True, "target": target})
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
 
 @app.route("/api/players")
 def api_players():
+    target = _session_target()
     try:
-        tmux_send("list")
+        tmux_send("list", target)
         time.sleep(0.8)
-        output = tmux_capture(50)
+        output = tmux_capture(50, target)
         for line in reversed(output.strip().splitlines()):
             m = re.search(
                 r'There are (\d+) of a max(?: of)? (\d+) players online: ?(.*)',
@@ -245,6 +265,7 @@ def api_players():
 
 @app.route("/api/say", methods=["POST"])
 def api_say():
+    target = _session_target()
     try:
         data = request.get_json(force=True, silent=True) or {}
         message = str(data.get("message", "")).strip()
@@ -258,7 +279,7 @@ def api_say():
         message = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', message)
         if not message:
             return jsonify({"ok": False, "error": "Message was empty after stripping control characters"}), 400
-        tmux_send(f"say {message}")
+        tmux_send(f"say {message}", target)
         return jsonify({"ok": True})
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": str(e)}), 503
@@ -269,8 +290,9 @@ def api_say():
 @app.route("/api/server/status")
 def api_server_status():
     """Detect whether a Minecraft server process is running inside our tmux pane."""
+    target = _session_target()
     try:
-        return jsonify(_pane_java_info())
+        return jsonify(_pane_java_info(target))
     except subprocess.CalledProcessError:
         return jsonify({"running": False})
     except Exception as e:
@@ -280,10 +302,11 @@ def api_server_status():
 @app.route("/api/server/jars")
 def api_server_jars():
     """List .jar files available in the configured jars directory."""
+    target = _session_target()
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
     try:
         jars_path = os.path.join(gdir, JARS_DIR)
         if not os.path.isdir(jars_path):
@@ -297,9 +320,10 @@ def api_server_jars():
 @app.route("/api/server/start", methods=["POST"])
 def api_server_start():
     """Send the java start command to the tmux session."""
-    data = request.get_json(force=True, silent=True) or {}
-    jar = str(data.get("jar", "")).strip()
-    mem = str(data.get("mem", "1024M")).strip().upper()
+    target = _session_target()
+    data   = request.get_json(force=True, silent=True) or {}
+    jar    = str(data.get("jar", "")).strip()
+    mem    = str(data.get("mem", "1024M")).strip().upper()
 
     if not re.match(r'^[\w][\w\-\.]*\.jar$', jar):
         return jsonify({"ok": False, "error": "Invalid jar name"}), 400
@@ -307,15 +331,15 @@ def api_server_start():
         return jsonify({"ok": False, "error": "Invalid memory value — use e.g. 1024M or 2G"}), 400
 
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     jar_path = os.path.join(gdir, JARS_DIR, jar)
     if not os.path.isfile(jar_path):
         return jsonify({"ok": False, "error": f"Jar not found: {jar}"}), 404
 
-    if _is_running():
+    if _is_running(target):
         return jsonify({"ok": False, "error": "Server is already running"}), 409
 
     cmd = f"java -Xmx{mem} -Xms{mem} -jar {jar_path} nogui"
@@ -323,10 +347,10 @@ def api_server_start():
         cmd = f"cd {SERVER_DIR} && {cmd}"
 
     try:
-        session = TMUX_TARGET.split(":")[0]
+        session = target.split(":")[0]
         has = subprocess.run(["tmux", "has-session", "-t", session], capture_output=True)
         if has.returncode == 0:
-            tmux_send(cmd)
+            tmux_send(cmd, target)
         else:
             subprocess.run(
                 ["tmux", "new-session", "-d", "-s", session, cmd],
@@ -342,10 +366,11 @@ def api_server_start():
 @app.route("/api/server/stop", methods=["POST"])
 def api_server_stop():
     """Send the 'stop' command to the Minecraft server console via tmux."""
-    if not _is_running():
+    target = _session_target()
+    if not _is_running(target):
         return jsonify({"ok": False, "error": "Server is not running"}), 409
     try:
-        tmux_send("stop")
+        tmux_send("stop", target)
         return jsonify({"ok": True})
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": str(e)}), 503
@@ -354,6 +379,7 @@ def api_server_stop():
 @app.route("/api/server/download-fabric", methods=["POST"])
 def api_download_fabric():
     """Run get-me-fabric.sh to download a Fabric server jar into JARS_DIR."""
+    target  = _session_target()
     data    = request.get_json(force=True, silent=True) or {}
     version = str(data.get("version", "")).strip()
     app.logger.debug(f"Requested Fabric download for version: '{version}' ({type(version)})")
@@ -365,9 +391,9 @@ def api_download_fabric():
         return jsonify({"ok": False, "error": "Invalid version string"}), 400
 
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     script = os.path.join(gdir, "get-me-fabric.sh")
     if not os.path.isfile(script):
@@ -392,7 +418,7 @@ def api_download_fabric():
         if result.returncode == 0:
             return jsonify({"ok": True, "output": output})
         return jsonify({
-            "ok": False,
+            "ok":    False,
             "error": f"Script exited with code {result.returncode}",
             "output": output,
         })
@@ -405,14 +431,15 @@ def api_download_fabric():
 @app.route("/api/server/identity")
 def api_server_identity():
     """Return server icon availability and cleaned MOTD from server.properties."""
+    target = _session_target()
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     has_icon = os.path.isfile(os.path.join(gdir, "server-icon.png"))
 
-    motd = None
+    motd  = None
     props = os.path.join(gdir, "server.properties")
     if os.path.isfile(props):
         try:
@@ -441,10 +468,11 @@ def api_server_identity():
 @app.route("/api/server/icon")
 def api_server_icon():
     """Serve the server-icon.png from the tmux pane's working directory."""
+    target = _session_target()
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     icon = os.path.join(gdir, "server-icon.png")
     if not os.path.isfile(icon):
@@ -486,10 +514,11 @@ def api_latest_minecraft():
 @app.route("/api/worlds/list")
 def api_worlds_list():
     """List .tgz world saves in WORLDS_DIR with per-file and total sizes."""
+    target = _session_target()
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     saves_path = os.path.join(gdir, WORLDS_DIR)
     if not os.path.isdir(saves_path):
@@ -514,16 +543,17 @@ def api_worlds_list():
 @app.route("/api/worlds/save", methods=["POST"])
 def api_worlds_save():
     """Tar the 'world' directory into a timestamped archive in WORLDS_DIR."""
-    if _is_running():
+    target = _session_target()
+    if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before saving a world"}), 409
 
     data = request.get_json(force=True, silent=True) or {}
     name = re.sub(r'[^a-zA-Z0-9_-]', '', str(data.get("name", "")).strip())[:50]
 
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     world_path = os.path.join(gdir, "world")
     if not os.path.isdir(world_path):
@@ -551,7 +581,8 @@ def api_worlds_save():
 @app.route("/api/worlds/load", methods=["POST"])
 def api_worlds_load():
     """Autosave current world, delete it, then extract the selected archive."""
-    if _is_running():
+    target = _session_target()
+    if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before loading a world"}), 409
 
     data     = request.get_json(force=True, silent=True) or {}
@@ -561,9 +592,9 @@ def api_worlds_load():
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
 
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     saves_path   = os.path.join(gdir, WORLDS_DIR)
     archive_path = os.path.join(saves_path, filename)
@@ -609,6 +640,7 @@ def api_worlds_load():
 @app.route("/api/worlds/delete", methods=["POST"])
 def api_worlds_delete():
     """Delete a single world save archive."""
+    target   = _session_target()
     data     = request.get_json(force=True, silent=True) or {}
     filename = str(data.get("filename", "")).strip()
 
@@ -616,9 +648,9 @@ def api_worlds_delete():
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
 
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     file_path = os.path.join(gdir, WORLDS_DIR, filename)
     if not os.path.isfile(file_path):
@@ -634,10 +666,11 @@ def api_worlds_delete():
 @app.route("/api/worlds/delete-autosaves", methods=["POST"])
 def api_worlds_delete_autosaves():
     """Delete all autosave archives from WORLDS_DIR."""
+    target = _session_target()
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     saves_path = os.path.join(gdir, WORLDS_DIR)
     if not os.path.isdir(saves_path):
@@ -661,10 +694,11 @@ def api_worlds_delete_autosaves():
 @app.route("/api/mods/list")
 def api_mods_list():
     """List active (mods/) and inactive (mods-saves/) mod files with sizes."""
+    target = _session_target()
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     def _scan(path):
         if not os.path.isdir(path):
@@ -691,16 +725,17 @@ def api_mods_list():
 @app.route("/api/mods/activate", methods=["POST"])
 def api_mods_activate():
     """Move a mod from mods-saves/ into mods/."""
-    if _is_running():
+    target = _session_target()
+    if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
     data     = request.get_json(force=True, silent=True) or {}
     filename = str(data.get("filename", "")).strip()
     if not _validate_mod_filename(filename):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
     return _do_mod_move(
         os.path.join(gdir, MODS_SAVES_DIR),
         os.path.join(gdir, MODS_DIR),
@@ -711,16 +746,17 @@ def api_mods_activate():
 @app.route("/api/mods/deactivate", methods=["POST"])
 def api_mods_deactivate():
     """Move a mod from mods/ into mods-saves/."""
-    if _is_running():
+    target = _session_target()
+    if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
     data     = request.get_json(force=True, silent=True) or {}
     filename = str(data.get("filename", "")).strip()
     if not _validate_mod_filename(filename):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
     return _do_mod_move(
         os.path.join(gdir, MODS_DIR),
         os.path.join(gdir, MODS_SAVES_DIR),
@@ -731,6 +767,7 @@ def api_mods_deactivate():
 @app.route("/api/mods/delete", methods=["POST"])
 def api_mods_delete():
     """Delete a mod from 'active', 'inactive', or 'both' locations."""
+    target   = _session_target()
     data     = request.get_json(force=True, silent=True) or {}
     filename = str(data.get("filename", "")).strip()
     location = str(data.get("location", "")).strip()
@@ -741,19 +778,19 @@ def api_mods_delete():
         return jsonify({"ok": False, "error": "Invalid location"}), 400
 
     try:
-        gdir = tmux_pane_path()
+        gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
-        return jsonify({"ok": False, "error": f"tmux target '{TMUX_TARGET}' not found"}), 503
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
-    targets = []
+    file_targets = []
     if location in ("active", "both"):
-        targets.append(os.path.join(gdir, MODS_DIR, filename))
+        file_targets.append(os.path.join(gdir, MODS_DIR, filename))
     if location in ("inactive", "both"):
-        targets.append(os.path.join(gdir, MODS_SAVES_DIR, filename))
+        file_targets.append(os.path.join(gdir, MODS_SAVES_DIR, filename))
 
     errors  = []
     deleted = 0
-    for path in targets:
+    for path in file_targets:
         if os.path.isfile(path):
             try:
                 os.remove(path)
@@ -768,12 +805,14 @@ def api_mods_delete():
 
 @app.route("/api/console/stream")
 def api_console_stream():
+    target = _session_target()
+
     def generate():
-        yield f"retry: 3000\n\n"
+        yield "retry: 3000\n\n"
         last = ""
         while True:
             try:
-                content = tmux_capture(300)
+                content = tmux_capture(300, target)
                 if content != last:
                     yield f"data: {json.dumps({'content': content})}\n\n"
                     last = content
@@ -788,7 +827,7 @@ def api_console_stream():
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
+            "Connection":    "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
@@ -798,8 +837,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VibePanel — Minecraft web frontend")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--session", default=None,
-                        help="tmux target (session, session:window, or session:window.pane)")
+    parser.add_argument("--session", action="append", dest="sessions", default=None,
+                        help="tmux target (session, session:window, or session:window.pane); "
+                             "repeat for multiple servers: --session mc1 --session mc2")
     parser.add_argument("--jars-dir", default=None,
                         help="path to server-jars directory (default: ./server-jars)")
     parser.add_argument("--server-dir", default=None,
@@ -812,8 +852,6 @@ if __name__ == "__main__":
                         help="path to inactive mods directory (default: ./mods-saves)")
     args = parser.parse_args()
 
-    if args.session:
-        TMUX_TARGET = args.session
     if args.jars_dir:
         JARS_DIR = args.jars_dir
     if args.server_dir:
@@ -825,8 +863,14 @@ if __name__ == "__main__":
     if args.mods_saves_dir:
         MODS_SAVES_DIR = args.mods_saves_dir
 
-    TMUX_TARGET = _resolve_tmux_target(TMUX_TARGET)
+    raw_sessions = args.sessions or [TMUX_TARGET]
+    if len(raw_sessions) == 1:
+        SESSIONS = [_resolve_tmux_target(raw_sessions[0])]
+    else:
+        SESSIONS = list(raw_sessions)
+    TMUX_TARGET = SESSIONS[0]
 
+    session_display = ', '.join(SESSIONS)
     print(f"VibePanel starting on http://{args.host}:{args.port}  "
-          f"(tmux: {TMUX_TARGET}, jars: {JARS_DIR})")
+          f"(sessions: {session_display}, jars: {JARS_DIR})")
     app.run(host=args.host, port=args.port, threaded=True)

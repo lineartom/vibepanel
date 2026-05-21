@@ -3,8 +3,9 @@
 ## Running the dev server
 
 ```bash
-python server.py                          # defaults: 0.0.0.0:8080, tmux session "minecraft"
-python server.py --port 5000 --session mc # custom port and session name
+python server.py                                        # defaults: 0.0.0.0:8080, tmux session "minecraft"
+python server.py --port 5000 --session mc               # custom port and session name
+python server.py --session survival --session creative  # multiple servers; shows tab switcher
 ```
 
 All config can also be set via environment variables (see below).
@@ -13,7 +14,7 @@ All config can also be set via environment variables (see below).
 
 | Flag | Env var | Default | Purpose |
 |---|---|---|---|
-| `--session` | `TMUX_TARGET` | `minecraft` | tmux target (session, session:window, or session:window.pane) |
+| `--session` | `TMUX_TARGET` | `minecraft` | tmux target; **repeat** for multiple servers: `--session mc1 --session mc2` |
 | `--jars-dir` | `JARS_DIR` | `server-jars` | dir (relative to game dir) where .jar files live |
 | `--server-dir` | `SERVER_DIR` | *(none)* | cd here before starting the server |
 | `--worlds-dir` | `WORLDS_DIR` | `world-saves` | dir for world .tgz backups |
