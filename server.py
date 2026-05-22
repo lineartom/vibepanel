@@ -309,8 +309,7 @@ def api_server_jars():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
     try:
         jars_path = os.path.join(gdir, JARS_DIR)
-        if not os.path.isdir(jars_path):
-            return jsonify({"ok": True, "jars": [], "jars_dir": JARS_DIR})
+        os.makedirs(jars_path, exist_ok=True)
         jars = sorted(f for f in os.listdir(jars_path) if f.endswith(".jar"))
         return jsonify({"ok": True, "jars": jars, "jars_dir": JARS_DIR})
     except Exception as e:
@@ -406,7 +405,9 @@ def api_download_fabric():
         except Exception as e:
             return jsonify({"ok": False, "error": f"Could not install get-me-fabric.sh: {e}"}), 500
 
-    cmd = [script, os.path.join(gdir, JARS_DIR)]
+    jars_path = os.path.join(gdir, JARS_DIR)
+    os.makedirs(jars_path, exist_ok=True)
+    cmd = [script, jars_path]
     if version:
         cmd.append(version)
 
@@ -521,8 +522,7 @@ def api_worlds_list():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     saves_path = os.path.join(gdir, WORLDS_DIR)
-    if not os.path.isdir(saves_path):
-        return jsonify({"ok": True, "saves": [], "total_bytes": 0})
+    os.makedirs(saves_path, exist_ok=True)
 
     try:
         saves = []
@@ -699,6 +699,9 @@ def api_mods_list():
         gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
+
+    os.makedirs(os.path.join(gdir, MODS_DIR), exist_ok=True)
+    os.makedirs(os.path.join(gdir, MODS_SAVES_DIR), exist_ok=True)
 
     def _scan(path):
         if not os.path.isdir(path):
