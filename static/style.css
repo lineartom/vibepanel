@@ -21,6 +21,8 @@
 
 /* ── Reset ──────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+/* Ensure [hidden] always wins over author display: rules (.card etc.) */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   background: var(--bg0);
