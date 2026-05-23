@@ -366,6 +366,11 @@ a { text-decoration: none; color: inherit; }
   color: var(--text2);
   word-break: break-all;
 }
+.srv-port-value {
+  display: inline-block;
+  width: auto;
+  color: var(--text2);
+}
 
 #srv-start-section {
   display: flex;

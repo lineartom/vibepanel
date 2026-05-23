@@ -91,6 +91,7 @@ function clickSessionTab(tab) {
     serverRunning  = null;
     jarsLoaded     = false;
     selectedJar    = null;
+    srvPort        = null;
     reconnectConsole();
   }
 
@@ -520,6 +521,7 @@ $('btn-overview-refresh').addEventListener('click', loadOverview);
 let srvPollTimer = null;
 let selectedJar  = null;
 let jarsLoaded   = false;
+let srvPort      = null;
 
 function srvStartPolling() {
   loadServerStatus();
@@ -547,7 +549,16 @@ async function loadServerIdentity() {
   try {
     const res  = await fetch(api('/api/server/identity'));
     const data = await res.json();
-    if (!data.ok) { wrap.hidden = true; return; }
+    if (!data.ok) { wrap.hidden = true; $('srv-port-card').hidden = true; return; }
+
+    srvPort = data.port ?? null;
+    const portCard = $('srv-port-card');
+    if (srvPort) {
+      $('srv-port-value').textContent = srvPort;
+      portCard.hidden = false;
+    } else {
+      portCard.hidden = true;
+    }
 
     const motdLines = data.motd
       ? data.motd.split('\n').filter(l => l.length > 0)

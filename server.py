@@ -440,7 +440,8 @@ def api_server_identity():
 
     has_icon = os.path.isfile(os.path.join(gdir, "server-icon.png"))
 
-    motd  = None
+    motd = None
+    port = None
     props = os.path.join(gdir, "server.properties")
     if os.path.isfile(props):
         try:
@@ -449,7 +450,11 @@ def api_server_identity():
                     key, _, val = line.strip().partition("=")
                     if key == "motd":
                         motd = val
-                        break
+                    elif key == "server-port":
+                        try:
+                            port = int(val.strip())
+                        except ValueError:
+                            pass
             if motd is not None:
                 # Resolve \uXXXX escapes first (§ = § is common in MOTDs)
                 motd = re.sub(r'\\u([0-9a-fA-F]{4})',
@@ -463,7 +468,7 @@ def api_server_identity():
         except Exception:
             pass
 
-    return jsonify({"ok": True, "has_icon": has_icon, "motd": motd})
+    return jsonify({"ok": True, "has_icon": has_icon, "motd": motd, "port": port})
 
 
 @app.route("/api/server/icon")
