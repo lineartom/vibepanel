@@ -30,6 +30,8 @@ function parseWorldSave(filename) {
 
 let sessions       = [];
 let currentSession = '';
+// 'overview' or a session name — tracks which tab is highlighted
+let activeTab      = 'overview';
 
 // Appends ?s=<session> to API paths when multiple sessions are configured.
 function api(path) {
@@ -53,40 +55,54 @@ async function loadSessions() {
 
 function renderSessionTabs() {
   const el = $('session-tabs');
-  if (sessions.length <= 1) {
-    el.hidden = true;
-    return;
-  }
   el.hidden = false;
-  el.innerHTML = sessions.map(s => `
-    <button class="session-tab${s === currentSession ? ' active' : ''}"
-            data-session="${esc(s)}">${esc(s)}</button>`).join('');
+
+  let html = `<button class="session-tab session-tab--overview${activeTab === 'overview' ? ' active' : ''}"
+                      data-tab="overview">Overview</button>`;
+  if (sessions.length > 0) {
+    html += `<span class="session-tab-sep"></span>`;
+  }
+  sessions.forEach(s => {
+    html += `<button class="session-tab${s === activeTab ? ' active' : ''}"
+                     data-tab="${esc(s)}">${esc(s)}</button>`;
+  });
+  el.innerHTML = html;
+
   el.querySelectorAll('.session-tab').forEach(btn => {
-    btn.addEventListener('click', () => switchSession(btn.dataset.session));
+    btn.addEventListener('click', () => clickSessionTab(btn.dataset.tab));
   });
 }
 
-function switchSession(name) {
-  if (name === currentSession) return;
-  currentSession = name;
-  renderSessionTabs();
-
-  // Reset per-session UI state
-  serverRunning = null;
-  jarsLoaded    = false;
-  selectedJar   = null;
-
-  reconnectConsole();
-  fetchServerRunning();
-
-  // Reload whatever page is currently visible
-  if (activePage === 'overview') loadOverview();
-  if (activePage === 'players') {
-    $('players-body').innerHTML = '<p class="hint">Hit Refresh to query the server.</p>';
+function clickSessionTab(tab) {
+  if (tab === 'overview') {
+    activeTab = 'overview';
+    renderSessionTabs();
+    navigate('overview');
+    return;
   }
-  if (activePage === 'server')  { srvStopPolling(); srvStartPolling(); }
-  if (activePage === 'mods')    loadMods();
-  if (activePage === 'worlds')  loadWorlds();
+
+  // Switching to a specific session always lands on its Server page.
+  const switching    = tab !== currentSession;
+  const wasOnServer  = activePage === 'server';
+  activeTab = tab;
+
+  if (switching) {
+    currentSession = tab;
+    serverRunning  = null;
+    jarsLoaded     = false;
+    selectedJar    = null;
+    reconnectConsole();
+  }
+
+  renderSessionTabs();
+  navigate('server');
+
+  // navigate() short-circuits when already on the server page, so the enter-hooks
+  // (srvStartPolling → loadJars, loadServerIdentity, etc.) never run. Force them.
+  if (switching && wasOnServer) {
+    srvStopPolling();
+    srvStartPolling();
+  }
 }
 
 // ── Navigation ───────────────────────────────────────────
@@ -101,6 +117,14 @@ function navigate(page) {
   if (activePage === 'server')   srvStopPolling();
 
   activePage = page;
+
+  // Keep session tab highlight in sync with sidebar navigation.
+  if (page === 'overview') {
+    activeTab = 'overview';
+  } else if (activeTab === 'overview' && currentSession) {
+    activeTab = currentSession;
+  }
+  renderSessionTabs();
 
   document.querySelectorAll('.page').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'));
@@ -486,8 +510,7 @@ function renderOverviewCards() {
 }
 
 function goToSession(session) {
-  if (sessions.length > 1 && session !== currentSession) switchSession(session);
-  navigate('server');
+  clickSessionTab(session);
 }
 
 $('btn-overview-refresh').addEventListener('click', loadOverview);

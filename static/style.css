@@ -724,6 +724,20 @@ a { text-decoration: none; color: inherit; }
   border-color: rgba(63,185,80,.4);
 }
 
+.session-tab--overview.active {
+  background: rgba(88,166,255,.12);
+  color: var(--blue);
+  border-color: rgba(88,166,255,.35);
+}
+
+.session-tab-sep {
+  width: 1px;
+  background: var(--border);
+  align-self: stretch;
+  margin: .1rem .3rem;
+  flex-shrink: 0;
+}
+
 /* ── Responsive ─────────────────────────────────────────── */
 @media (max-width: 700px) {
   #sidebar    { display: none; }
