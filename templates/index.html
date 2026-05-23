@@ -16,8 +16,14 @@
       <span class="nav-brand-name">VibePanel</span>
     </div>
     <div class="nav-links">
-      <a href="#" class="nav-link active" data-page="console">
-        <span class="nav-icon">&#x1F5A5;</span><span>Console</span>
+      <a href="#" class="nav-link active" data-page="server">
+        <span class="nav-icon">&#x2699;&#xFE0F;</span><span>Server</span>
+      </a>
+      <a href="#" class="nav-link" data-page="worlds">
+        <span class="nav-icon">&#x1F30D;</span><span>Worlds</span>
+      </a>
+      <a href="#" class="nav-link" data-page="mods">
+        <span class="nav-icon">&#x1F9E9;</span><span>Mods</span>
       </a>
       <a href="#" class="nav-link" data-page="players">
         <span class="nav-icon">&#x1F465;</span><span>Players</span>
@@ -25,14 +31,8 @@
       <a href="#" class="nav-link" data-page="say">
         <span class="nav-icon">&#x1F4AC;</span><span>Say</span>
       </a>
-      <a href="#" class="nav-link" data-page="mods">
-        <span class="nav-icon">&#x1F9E9;</span><span>Mods</span>
-      </a>
-      <a href="#" class="nav-link" data-page="worlds">
-        <span class="nav-icon">&#x1F30D;</span><span>Worlds</span>
-      </a>
-      <a href="#" class="nav-link" data-page="server">
-        <span class="nav-icon">&#x2699;&#xFE0F;</span><span>Server</span>
+      <a href="#" class="nav-link" data-page="console">
+        <span class="nav-icon">&#x1F5A5;</span><span>Console</span>
       </a>
     </div>
     <div class="nav-footer">
@@ -45,8 +45,14 @@
 
   <!-- Mobile bottom nav -->
   <nav id="bottom-nav">
-    <a href="#" class="nav-link active" data-page="console">
-      <span class="nav-icon">&#x1F5A5;</span><span>Console</span>
+    <a href="#" class="nav-link active" data-page="server">
+      <span class="nav-icon">&#x2699;&#xFE0F;</span><span>Server</span>
+    </a>
+    <a href="#" class="nav-link" data-page="worlds">
+      <span class="nav-icon">&#x1F30D;</span><span>Worlds</span>
+    </a>
+    <a href="#" class="nav-link" data-page="mods">
+      <span class="nav-icon">&#x1F9E9;</span><span>Mods</span>
     </a>
     <a href="#" class="nav-link" data-page="players">
       <span class="nav-icon">&#x1F465;</span><span>Players</span>
@@ -54,14 +60,8 @@
     <a href="#" class="nav-link" data-page="say">
       <span class="nav-icon">&#x1F4AC;</span><span>Say</span>
     </a>
-    <a href="#" class="nav-link" data-page="mods">
-      <span class="nav-icon">&#x1F9E9;</span><span>Mods</span>
-    </a>
-    <a href="#" class="nav-link" data-page="worlds">
-      <span class="nav-icon">&#x1F30D;</span><span>Worlds</span>
-    </a>
-    <a href="#" class="nav-link" data-page="server">
-      <span class="nav-icon">&#x2699;&#xFE0F;</span><span>Server</span>
+    <a href="#" class="nav-link" data-page="console">
+      <span class="nav-icon">&#x1F5A5;</span><span>Console</span>
     </a>
   </nav>
 
@@ -70,102 +70,8 @@
     <!-- Session tabs (hidden when only one session is configured) -->
     <div id="session-tabs" hidden></div>
 
-    <!-- Console -->
-    <section id="page-console" class="page active">
-      <header class="page-header">
-        <h1>Console</h1>
-        <div id="console-conn" class="conn-badge">
-          <span class="conn-dot"></span>
-          <span id="console-conn-text">Connecting</span>
-        </div>
-      </header>
-      <div id="console-out" class="terminal" aria-live="polite" aria-label="Server console output"></div>
-    </section>
-
-    <!-- Players -->
-    <section id="page-players" class="page">
-      <header class="page-header">
-        <h1>Players</h1>
-        <button id="btn-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
-      </header>
-      <div id="players-body">
-        <p class="hint">Hit Refresh to query the server.</p>
-      </div>
-    </section>
-
-    <!-- Say -->
-    <section id="page-say" class="page">
-      <header class="page-header">
-        <h1>Say</h1>
-      </header>
-      <div class="card say-card">
-        <label class="field-label" for="say-input">Message <span class="muted">(broadcasts as [Server])</span></label>
-        <textarea id="say-input" class="say-textarea" rows="3" maxlength="256"
-                  placeholder="Type something&#x2026;"></textarea>
-        <div class="say-row">
-          <span id="char-count" class="char-count">0 / 256</span>
-          <button id="btn-say" class="btn btn-primary">Send</button>
-        </div>
-        <p id="say-offline-note" class="offline-note" hidden>Server is not running.</p>
-        <div id="say-feedback" aria-live="polite"></div>
-      </div>
-      <div id="say-history-wrap">
-        <h2 class="section-title">Sent</h2>
-        <div id="say-history"></div>
-      </div>
-    </section>
-
-    <!-- Mods -->
-    <section id="page-mods" class="page">
-      <header class="page-header">
-        <h1>Mods</h1>
-        <button id="btn-mods-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
-      </header>
-
-      <p id="mods-running-note" class="offline-note" hidden>Stop the server before changing mods.</p>
-
-      <div id="mods-op-feedback" aria-live="polite"></div>
-
-      <div class="mods-columns">
-        <div class="mods-col">
-          <h2 class="section-title">Active <span id="mods-active-count" class="mod-count"></span></h2>
-          <div id="mods-active-list"><p class="hint">Loading&hellip;</p></div>
-        </div>
-        <div class="mods-col">
-          <h2 class="section-title">Inactive <span id="mods-inactive-count" class="mod-count"></span></h2>
-          <div id="mods-inactive-list"><p class="hint">Loading&hellip;</p></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Worlds -->
-    <section id="page-worlds" class="page">
-      <header class="page-header">
-        <h1>Worlds</h1>
-        <button id="btn-worlds-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
-      </header>
-
-      <p id="worlds-running-note" class="offline-note" hidden>Stop the server before saving or loading worlds.</p>
-
-      <div class="card">
-        <div class="field-label">Save Current World</div>
-        <div class="save-name-row">
-          <input id="world-name" class="mem-input" type="text"
-                 placeholder="Optional name&hellip;" autocomplete="off" spellcheck="false" maxlength="50">
-          <button id="btn-world-save" class="btn btn-primary">&#x1F4BE; Save</button>
-        </div>
-        <div id="world-save-feedback" aria-live="polite"></div>
-      </div>
-
-      <div id="worlds-op-feedback" class="worlds-op-feedback" aria-live="polite"></div>
-
-      <div id="worlds-list-wrap">
-        <p class="hint">Loading&hellip;</p>
-      </div>
-    </section>
-
     <!-- Server -->
-    <section id="page-server" class="page">
+    <section id="page-server" class="page active">
       <header class="page-header">
         <h1>Server</h1>
         <button id="btn-srv-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
@@ -213,6 +119,100 @@
       <div id="dl-output-wrap" hidden>
         <pre id="dl-output" class="dl-output"></pre>
       </div>
+    </section>
+
+    <!-- Worlds -->
+    <section id="page-worlds" class="page">
+      <header class="page-header">
+        <h1>Worlds</h1>
+        <button id="btn-worlds-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+      </header>
+
+      <p id="worlds-running-note" class="offline-note" hidden>Stop the server before saving or loading worlds.</p>
+
+      <div class="card">
+        <div class="field-label">Save Current World</div>
+        <div class="save-name-row">
+          <input id="world-name" class="mem-input" type="text"
+                 placeholder="Optional name&hellip;" autocomplete="off" spellcheck="false" maxlength="50">
+          <button id="btn-world-save" class="btn btn-primary">&#x1F4BE; Save</button>
+        </div>
+        <div id="world-save-feedback" aria-live="polite"></div>
+      </div>
+
+      <div id="worlds-op-feedback" class="worlds-op-feedback" aria-live="polite"></div>
+
+      <div id="worlds-list-wrap">
+        <p class="hint">Loading&hellip;</p>
+      </div>
+    </section>
+
+    <!-- Mods -->
+    <section id="page-mods" class="page">
+      <header class="page-header">
+        <h1>Mods</h1>
+        <button id="btn-mods-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+      </header>
+
+      <p id="mods-running-note" class="offline-note" hidden>Stop the server before changing mods.</p>
+
+      <div id="mods-op-feedback" aria-live="polite"></div>
+
+      <div class="mods-columns">
+        <div class="mods-col">
+          <h2 class="section-title">Active <span id="mods-active-count" class="mod-count"></span></h2>
+          <div id="mods-active-list"><p class="hint">Loading&hellip;</p></div>
+        </div>
+        <div class="mods-col">
+          <h2 class="section-title">Inactive <span id="mods-inactive-count" class="mod-count"></span></h2>
+          <div id="mods-inactive-list"><p class="hint">Loading&hellip;</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Players -->
+    <section id="page-players" class="page">
+      <header class="page-header">
+        <h1>Players</h1>
+        <button id="btn-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+      </header>
+      <div id="players-body">
+        <p class="hint">Hit Refresh to query the server.</p>
+      </div>
+    </section>
+
+    <!-- Say -->
+    <section id="page-say" class="page">
+      <header class="page-header">
+        <h1>Say</h1>
+      </header>
+      <div class="card say-card">
+        <label class="field-label" for="say-input">Message <span class="muted">(broadcasts as [Server])</span></label>
+        <textarea id="say-input" class="say-textarea" rows="3" maxlength="256"
+                  placeholder="Type something&#x2026;"></textarea>
+        <div class="say-row">
+          <span id="char-count" class="char-count">0 / 256</span>
+          <button id="btn-say" class="btn btn-primary">Send</button>
+        </div>
+        <p id="say-offline-note" class="offline-note" hidden>Server is not running.</p>
+        <div id="say-feedback" aria-live="polite"></div>
+      </div>
+      <div id="say-history-wrap">
+        <h2 class="section-title">Sent</h2>
+        <div id="say-history"></div>
+      </div>
+    </section>
+
+    <!-- Console -->
+    <section id="page-console" class="page">
+      <header class="page-header">
+        <h1>Console</h1>
+        <div id="console-conn" class="conn-badge">
+          <span class="conn-dot"></span>
+          <span id="console-conn-text">Connecting</span>
+        </div>
+      </header>
+      <div id="console-out" class="terminal" aria-live="polite" aria-label="Server console output"></div>
     </section>
 
   </main>

@@ -90,7 +90,7 @@ function switchSession(name) {
 
 // ── Navigation ───────────────────────────────────────────
 
-let activePage = 'console';
+let activePage = 'server';
 
 function navigate(page) {
   if (page === activePage) return;
@@ -961,6 +961,6 @@ $('btn-world-save').addEventListener('click', saveWorld);
   renderHistory();
   await loadSessions();
   initConsole();
-  fetchServerRunning();
+  srvStartPolling();
   setInterval(fetchServerRunning, 15000);
 })();
