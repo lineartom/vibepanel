@@ -95,8 +95,10 @@ a { text-decoration: none; color: inherit; }
   border-top: 1px solid var(--border);
   z-index: 200;
   align-items: stretch;
-  justify-content: space-around;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+#bottom-nav::-webkit-scrollbar { display: none; }
 #bottom-nav .nav-link {
   flex-direction: column;
   gap: 2px;
@@ -105,6 +107,8 @@ a { text-decoration: none; color: inherit; }
   border-radius: 0;
   justify-content: center;
   flex: 1;
+  flex-shrink: 0;
+  min-width: 60px;
   text-align: center;
 }
 #bottom-nav .nav-icon { font-size: 1.3rem; width: auto; }
@@ -636,6 +640,56 @@ a { text-decoration: none; color: inherit; }
 .btn-danger:hover:not(:disabled) { background: rgba(248,81,73,.2); }
 
 .btn-sm { padding: .3rem .65rem; font-size: .8rem; }
+
+/* ── Overview page ──────────────────────────────────────── */
+#page-overview { overflow-y: auto; }
+
+#overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 1rem;
+  align-content: start;
+}
+
+.overview-card {
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: .45rem;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.overview-card:hover { background: var(--bg2); border-color: var(--text3); }
+
+.overview-session-name {
+  font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  font-size: .9rem;
+  font-weight: 600;
+  word-break: break-all;
+}
+.overview-status-row {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+.overview-status-label { font-size: .88rem; }
+.overview-players {
+  font-size: .82rem;
+  color: var(--green);
+}
+.overview-players-loading { color: var(--text3); }
+.overview-jar {
+  font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  font-size: .73rem;
+  color: var(--text3);
+  word-break: break-all;
+}
+
+/* reuse .srv-dot for the overview status dot */
+.srv-dot.unknown { background: var(--text3); }
 
 /* ── Session tabs ───────────────────────────────────────── */
 #session-tabs {

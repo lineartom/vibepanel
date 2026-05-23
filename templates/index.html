@@ -16,7 +16,10 @@
       <span class="nav-brand-name">VibePanel</span>
     </div>
     <div class="nav-links">
-      <a href="#" class="nav-link active" data-page="server">
+      <a href="#" class="nav-link active" data-page="overview">
+        <span class="nav-icon">&#x1F3E0;</span><span>Overview</span>
+      </a>
+      <a href="#" class="nav-link" data-page="server">
         <span class="nav-icon">&#x2699;&#xFE0F;</span><span>Server</span>
       </a>
       <a href="#" class="nav-link" data-page="worlds">
@@ -45,7 +48,10 @@
 
   <!-- Mobile bottom nav -->
   <nav id="bottom-nav">
-    <a href="#" class="nav-link active" data-page="server">
+    <a href="#" class="nav-link active" data-page="overview">
+      <span class="nav-icon">&#x1F3E0;</span><span>Overview</span>
+    </a>
+    <a href="#" class="nav-link" data-page="server">
       <span class="nav-icon">&#x2699;&#xFE0F;</span><span>Server</span>
     </a>
     <a href="#" class="nav-link" data-page="worlds">
@@ -70,8 +76,17 @@
     <!-- Session tabs (hidden when only one session is configured) -->
     <div id="session-tabs" hidden></div>
 
+    <!-- Overview -->
+    <section id="page-overview" class="page active">
+      <header class="page-header">
+        <h1>Overview</h1>
+        <button id="btn-overview-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+      </header>
+      <div id="overview-grid"></div>
+    </section>
+
     <!-- Server -->
-    <section id="page-server" class="page active">
+    <section id="page-server" class="page">
       <header class="page-header">
         <h1>Server</h1>
         <button id="btn-srv-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>

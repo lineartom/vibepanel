@@ -80,6 +80,7 @@ function switchSession(name) {
   fetchServerRunning();
 
   // Reload whatever page is currently visible
+  if (activePage === 'overview') loadOverview();
   if (activePage === 'players') {
     $('players-body').innerHTML = '<p class="hint">Hit Refresh to query the server.</p>';
   }
@@ -90,13 +91,14 @@ function switchSession(name) {
 
 // ── Navigation ───────────────────────────────────────────
 
-let activePage = 'server';
+let activePage = 'overview';
 
 function navigate(page) {
   if (page === activePage) return;
 
   // Page-leave hooks
-  if (activePage === 'server') srvStopPolling();
+  if (activePage === 'overview') overviewStopPolling();
+  if (activePage === 'server')   srvStopPolling();
 
   activePage = page;
 
@@ -107,11 +109,12 @@ function navigate(page) {
   document.querySelectorAll(`.nav-link[data-page="${page}"]`).forEach(el => el.classList.add('active'));
 
   // Page-enter hooks
-  if (page === 'players') fetchServerRunning().then(() => { if (serverRunning !== false) loadPlayers(); });
-  if (page === 'say')     fetchServerRunning();
-  if (page === 'server')  srvStartPolling();
-  if (page === 'mods')    { fetchServerRunning(); loadMods(); }
-  if (page === 'worlds')  { fetchServerRunning(); loadWorlds(); }
+  if (page === 'overview') overviewStartPolling();
+  if (page === 'players')  fetchServerRunning().then(() => { if (serverRunning !== false) loadPlayers(); });
+  if (page === 'say')      fetchServerRunning();
+  if (page === 'server')   srvStartPolling();
+  if (page === 'mods')     { fetchServerRunning(); loadMods(); }
+  if (page === 'worlds')   { fetchServerRunning(); loadWorlds(); }
 }
 
 document.querySelectorAll('.nav-link').forEach(link => {
@@ -364,6 +367,130 @@ function applyServerRunningState() {
   $('btn-world-save').disabled = running;
   document.querySelectorAll('.btn-world-load').forEach(btn => { btn.disabled = running; });
 }
+
+// ── Overview ─────────────────────────────────────────────
+
+// Per-session cache: { [sessionName]: { running, jar, playerCount, playersLoaded } }
+const overviewCache   = {};
+let overviewPollTimer = null;
+
+function overviewStartPolling() {
+  loadOverview();
+  overviewPollTimer = setInterval(refreshOverviewStatus, 15000);
+}
+
+function overviewStopPolling() {
+  clearInterval(overviewPollTimer);
+  overviewPollTimer = null;
+}
+
+async function loadOverview() {
+  renderOverviewCards();
+
+  // 1. Fetch running status for all sessions in parallel.
+  const targets = sessions.length ? sessions : [currentSession];
+  const statuses = await Promise.all(targets.map(async s => {
+    try {
+      const res  = await fetch(`/api/server/status?s=${encodeURIComponent(s)}`);
+      const data = await res.json();
+      overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar, playerCount: null, playersLoaded: false };
+    } catch {
+      overviewCache[s] = { ...overviewCache[s], running: null };
+    }
+    return s;
+  }));
+  renderOverviewCards();
+
+  // 2. Fetch player counts only for sessions that are running.
+  await Promise.all(targets.filter(s => overviewCache[s]?.running).map(async s => {
+    try {
+      const res  = await fetch(`/api/players?s=${encodeURIComponent(s)}`);
+      const data = await res.json();
+      overviewCache[s].playerCount  = data.ok ? data.count  : null;
+      overviewCache[s].playerMax    = data.ok ? data.max    : null;
+      overviewCache[s].playersLoaded = true;
+    } catch {
+      overviewCache[s].playersLoaded = true;
+    }
+  }));
+  renderOverviewCards();
+}
+
+async function refreshOverviewStatus() {
+  const targets = sessions.length ? sessions : [currentSession];
+  await Promise.all(targets.map(async s => {
+    try {
+      const res  = await fetch(`/api/server/status?s=${encodeURIComponent(s)}`);
+      const data = await res.json();
+      const wasRunning = overviewCache[s]?.running;
+      overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar };
+      // If a server just came up, fetch its player count too.
+      if (!wasRunning && data.running) {
+        overviewCache[s].playerCount   = null;
+        overviewCache[s].playersLoaded = false;
+        fetch(`/api/players?s=${encodeURIComponent(s)}`)
+          .then(r => r.json())
+          .then(d => {
+            if (overviewCache[s]) {
+              overviewCache[s].playerCount   = d.ok ? d.count : null;
+              overviewCache[s].playerMax     = d.ok ? d.max   : null;
+              overviewCache[s].playersLoaded = true;
+              renderOverviewCards();
+            }
+          }).catch(() => {});
+      }
+    } catch { /* keep stale data */ }
+  }));
+  renderOverviewCards();
+}
+
+function renderOverviewCards() {
+  const grid    = $('overview-grid');
+  const targets = sessions.length ? sessions : [currentSession || ''];
+  if (!targets[0]) { grid.innerHTML = '<p class="hint">No sessions configured.</p>'; return; }
+
+  grid.innerHTML = targets.map(s => {
+    const d       = overviewCache[s];
+    const running = d?.running;
+    const dotCls  = running === true ? 'running' : running === false ? 'stopped' : 'unknown';
+    const label   = running === true ? 'Running' : running === false ? 'Stopped' : 'Checking…';
+
+    let players = '';
+    if (running) {
+      if (d?.playersLoaded) {
+        const n = d.playerCount ?? '?';
+        const m = d.playerMax   != null ? ` / ${d.playerMax}` : '';
+        players = `<div class="overview-players">${n}${m} online</div>`;
+      } else {
+        players = `<div class="overview-players overview-players-loading">…</div>`;
+      }
+    }
+
+    const jarLine = d?.jar ? `<div class="overview-jar">${esc(d.jar)}</div>` : '';
+
+    return `
+      <div class="overview-card" data-session="${esc(s)}">
+        <div class="overview-session-name">${esc(s)}</div>
+        <div class="overview-status-row">
+          <span class="srv-dot ${dotCls}"></span>
+          <span class="overview-status-label">${label}</span>
+        </div>
+        ${players}
+        ${jarLine}
+      </div>`;
+  }).join('');
+
+  grid.querySelectorAll('.overview-card').forEach(card => {
+    card.addEventListener('click', () => goToSession(card.dataset.session));
+  });
+}
+
+function goToSession(session) {
+  if (sessions.length > 1 && session !== currentSession) switchSession(session);
+  navigate('server');
+}
+
+$('btn-overview-refresh').addEventListener('click', loadOverview);
 
 // ── Server ───────────────────────────────────────────────
 
@@ -961,6 +1088,6 @@ $('btn-world-save').addEventListener('click', saveWorld);
   renderHistory();
   await loadSessions();
   initConsole();
-  srvStartPolling();
+  overviewStartPolling();
   setInterval(fetchServerRunning, 15000);
 })();
