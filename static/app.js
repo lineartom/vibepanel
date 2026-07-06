@@ -16,7 +16,7 @@ function fmtBytes(n) {
   if (n < 1024) return `${n} B`;
   if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
-  return `${(n / 1073741824).toFixed(2)} GB`;
+  return `${(n / 1073741824).toFixed(1)} GB`;
 }
 
 function parseWorldSave(filename) {
@@ -138,8 +138,8 @@ function navigate(page) {
   if (page === 'players')  fetchServerRunning().then(() => { if (serverRunning !== false) loadPlayers(); });
   if (page === 'say')      fetchServerRunning();
   if (page === 'server')   srvStartPolling();
-  if (page === 'mods')     { fetchServerRunning(); loadMods(); }
-  if (page === 'worlds')   { fetchServerRunning(); loadWorlds(); }
+  if (page === 'mods')     { fetchServerRunning(); loadMods(); loadSystemStats().then(() => renderDiskInfo('mods-disk-info')); }
+  if (page === 'worlds')   { fetchServerRunning(); loadWorlds(); loadSystemStats().then(() => renderDiskInfo('worlds-disk-info')); }
 }
 
 document.querySelectorAll('.nav-link').forEach(link => {
@@ -393,6 +393,61 @@ function applyServerRunningState() {
   document.querySelectorAll('.btn-world-load').forEach(btn => { btn.disabled = running; });
 }
 
+// ── System stats ────────────────────────────────────────
+
+let cachedSystemStats = null;
+
+async function loadSystemStats() {
+  try {
+    const res  = await fetch('/api/system/stats');
+    const data = await res.json();
+    if (data.ok) cachedSystemStats = data;
+  } catch (_) {}
+  return cachedSystemStats;
+}
+
+function renderSystemStats(stats) {
+  const el = $('system-stats');
+  if (!stats) { el.hidden = true; return; }
+
+  function bar(label, used, total, extra) {
+    const pct = total > 0 ? Math.min(100, used / total * 100) : 0;
+    const cls = pct > 90 ? 'stat-fill--danger' : pct > 75 ? 'stat-fill--warn' : '';
+    return `<div class="stat-row">
+      <span class="stat-label">${label}</span>
+      <div class="stat-bar"><div class="stat-fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div>
+      <span class="stat-value">${extra}</span>
+    </div>`;
+  }
+
+  let html = '';
+  const cpu = stats.cpu;
+  if (cpu) {
+    const pct = Math.min(100, cpu.load_1m / cpu.cores * 100);
+    html += bar('CPU', cpu.load_1m, cpu.cores,
+      `${pct.toFixed(0)}%&ensp;<span class="stat-detail">${cpu.load_1m} / ${cpu.cores} cores</span>`);
+  }
+  if (stats.ram) {
+    html += bar('RAM', stats.ram.used, stats.ram.total,
+      `${fmtBytes(stats.ram.used)} / ${fmtBytes(stats.ram.total)}`);
+  }
+  if (stats.disk) {
+    html += bar('Disk', stats.disk.used, stats.disk.total,
+      `${fmtBytes(stats.disk.used)} / ${fmtBytes(stats.disk.total)}`);
+  }
+  el.innerHTML = html;
+  el.hidden = !html;
+}
+
+function renderDiskInfo(elementId) {
+  const el = $(elementId);
+  const d  = cachedSystemStats?.disk;
+  if (!d) { el.hidden = true; return; }
+  const pct = d.total > 0 ? (d.used / d.total * 100).toFixed(0) : 0;
+  el.innerHTML = `Disk: ${fmtBytes(d.free)} free of ${fmtBytes(d.total)} (${pct}% used)`;
+  el.hidden = false;
+}
+
 // ── Overview ─────────────────────────────────────────────
 
 // Per-session cache: { [sessionName]: { running, jar, playerCount, playersLoaded } }
@@ -411,6 +466,9 @@ function overviewStopPolling() {
 
 async function loadOverview() {
   renderOverviewCards();
+
+  // System stats (host-level) — fire alongside session status fetches.
+  loadSystemStats().then(s => renderSystemStats(s));
 
   // 1. Fetch running status for all sessions in parallel.
   const targets = sessions.length ? sessions : [currentSession];
@@ -442,6 +500,7 @@ async function loadOverview() {
 }
 
 async function refreshOverviewStatus() {
+  loadSystemStats().then(s => renderSystemStats(s));
   const targets = sessions.length ? sessions : [currentSession];
   await Promise.all(targets.map(async s => {
     try {

@@ -76,6 +76,7 @@
         <h1>Overview</h1>
         <button id="btn-overview-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
       </header>
+      <div id="system-stats" hidden></div>
       <div id="overview-grid"></div>
     </section>
 
@@ -144,6 +145,7 @@
       </header>
 
       <p id="worlds-running-note" class="offline-note" hidden>Stop the server before saving or loading worlds.</p>
+      <div id="worlds-disk-info" class="disk-info" hidden></div>
 
       <div class="card">
         <div class="field-label">Save Current World</div>
@@ -170,6 +172,7 @@
       </header>
 
       <p id="mods-running-note" class="offline-note" hidden>Stop the server before changing mods.</p>
+      <div id="mods-disk-info" class="disk-info" hidden></div>
 
       <div id="mods-op-feedback" aria-live="polite"></div>
 

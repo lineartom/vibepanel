@@ -649,7 +649,62 @@ a { text-decoration: none; color: inherit; }
 .btn-sm { padding: .3rem .65rem; font-size: .8rem; }
 
 /* ── Overview page ──────────────────────────────────────── */
+/* ── System stats (overview) ────────────────────────────── */
 #page-overview { overflow-y: auto; }
+
+#system-stats {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  margin-bottom: 1rem;
+  padding: 1rem 1.25rem;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.stat-row {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+}
+.stat-label {
+  width: 3rem;
+  flex-shrink: 0;
+  font-size: .82rem;
+  font-weight: 600;
+  color: var(--text2);
+}
+.stat-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--bg3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.stat-fill {
+  height: 100%;
+  background: var(--green);
+  border-radius: 4px;
+  transition: width .4s;
+}
+.stat-fill--warn  { background: #d29922; }
+.stat-fill--danger { background: var(--red); }
+.stat-value {
+  font-size: .78rem;
+  color: var(--text2);
+  white-space: nowrap;
+  min-width: 0;
+}
+.stat-detail {
+  color: var(--text3);
+}
+
+/* ── Disk info (mods / worlds) ─────────────────────────── */
+.disk-info {
+  font-size: .82rem;
+  color: var(--text2);
+  padding: .4rem 0;
+}
 
 #overview-grid {
   display: grid;

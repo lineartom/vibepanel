@@ -811,6 +811,68 @@ def api_mods_delete():
     return jsonify({"ok": True, "deleted": deleted})
 
 
+def _get_ram_stats() -> dict | None:
+    """Return {total, used, available} in bytes without psutil."""
+    # Linux: /proc/meminfo
+    try:
+        info = {}
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                key, _, val = line.partition(":")
+                parts = val.strip().split()
+                if parts:
+                    info[key.strip()] = int(parts[0]) * 1024  # kB → bytes
+        total = info["MemTotal"]
+        available = info.get(
+            "MemAvailable",
+            info.get("MemFree", 0) + info.get("Buffers", 0) + info.get("Cached", 0),
+        )
+        return {"total": total, "used": total - available, "available": available}
+    except (FileNotFoundError, ValueError, KeyError):
+        pass
+
+    # macOS fallback
+    try:
+        page = os.sysconf("SC_PAGE_SIZE")
+        total = os.sysconf("SC_PHYS_PAGES") * page
+        vm = subprocess.check_output(["vm_stat"], text=True)
+        pages = {}
+        for line in vm.splitlines():
+            if ":" in line and not line.startswith("Mach"):
+                k, v = line.split(":", 1)
+                pages[k.strip()] = int(v.strip().rstrip("."))
+        available = (pages.get("Pages free", 0) + pages.get("Pages inactive", 0)) * page
+        return {"total": total, "used": total - available, "available": available}
+    except Exception:
+        return None
+
+
+@app.route("/api/system/stats")
+def api_system_stats():
+    """Host-level CPU, RAM, and disk stats (no session param needed)."""
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except OSError:
+        load1 = load5 = load15 = 0.0
+    cores = os.cpu_count() or 1
+
+    ram = _get_ram_stats()
+
+    try:
+        du = shutil.disk_usage("/")
+        disk = {"total": du.total, "used": du.used, "free": du.free}
+    except OSError:
+        disk = None
+
+    return jsonify({
+        "ok": True,
+        "cpu":  {"load_1m": round(load1, 2), "load_5m": round(load5, 2),
+                 "load_15m": round(load15, 2), "cores": cores},
+        "ram":  ram,
+        "disk": disk,
+    })
+
+
 @app.route("/api/console/stream")
 def api_console_stream():
     target = _session_target()
