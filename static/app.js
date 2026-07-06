@@ -81,9 +81,11 @@ function clickSessionTab(tab) {
     return;
   }
 
-  // Switching to a specific session always lands on its Server page.
+  // Switching sessions keeps the current control page; coming from
+  // Overview lands on the Server page.
+  const targetPage   = activePage === 'overview' ? 'server' : activePage;
   const switching    = tab !== currentSession;
-  const wasOnServer  = activePage === 'server';
+  const wasOnTarget  = activePage === targetPage;
   activeTab = tab;
 
   if (switching) {
@@ -96,13 +98,14 @@ function clickSessionTab(tab) {
   }
 
   renderSessionTabs();
-  navigate('server');
+  navigate(targetPage);
 
-  // navigate() short-circuits when already on the server page, so the enter-hooks
-  // (srvStartPolling → loadJars, loadServerIdentity, etc.) never run. Force them.
-  if (switching && wasOnServer) {
-    srvStopPolling();
-    srvStartPolling();
+  // navigate() short-circuits when already on the target page, so the
+  // enter-hooks (loadMods, srvStartPolling, etc.) never run. Force them
+  // so the new session's data loads.
+  if (switching && wasOnTarget) {
+    if (targetPage === 'server') srvStopPolling();
+    runPageEnterHooks(targetPage);
   }
 }
 
@@ -133,7 +136,10 @@ function navigate(page) {
   $(`page-${page}`).classList.add('active');
   document.querySelectorAll(`.nav-link[data-page="${page}"]`).forEach(el => el.classList.add('active'));
 
-  // Page-enter hooks
+  runPageEnterHooks(page);
+}
+
+function runPageEnterHooks(page) {
   if (page === 'overview') overviewStartPolling();
   if (page === 'players')  fetchServerRunning().then(() => { if (serverRunning !== false) loadPlayers(); });
   if (page === 'say')      fetchServerRunning();
