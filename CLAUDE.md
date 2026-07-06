@@ -46,6 +46,7 @@ The "game directory" is resolved from the **foreground process group's CWD** ins
   mods-saves/        # inactive/stashed mods                (MODS_SAVES_DIR)
   world-saves/       # .tgz world backups                   (WORLDS_DIR)
   get-me-fabric.sh   # auto-installed from repo root if missing
+  .vibepanel.json    # panel state: last-used jar per session (written on start/stop)
 ```
 
 ## Dependencies

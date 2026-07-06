@@ -715,7 +715,11 @@ async function loadJars() {
       return;
     }
 
-    // Auto-select if only one jar
+    // Default to the jar this server last ran (unless the user already
+    // picked one this visit), else auto-select if only one jar.
+    if (!selectedJar && data.last_jar && data.jars.includes(data.last_jar)) {
+      selectedJar = data.last_jar;
+    }
     if (data.jars.length === 1) selectedJar = data.jars[0];
 
     wrap.innerHTML = '<div class="jar-list"></div>';

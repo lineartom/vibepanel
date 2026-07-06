@@ -128,6 +128,38 @@ def _is_running(target: str = None) -> bool:
         return False
 
 
+STATE_FILE = ".vibepanel.json"
+
+
+def _load_state(gdir: str) -> dict:
+    """Read the panel's per-game-dir state file ({} if missing/corrupt)."""
+    try:
+        with open(os.path.join(gdir, STATE_FILE)) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_last_jar(gdir: str, session: str, jar: str) -> None:
+    """Persist the jar a session last ran, keyed by session name. Best-effort."""
+    if not jar:
+        return
+    try:
+        state = _load_state(gdir)
+        state.setdefault("last_jar", {})[session] = jar
+        path = os.path.join(gdir, STATE_FILE)
+        tmp  = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(state, fh, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _last_jar(gdir: str, session: str) -> str | None:
+    return _load_state(gdir).get("last_jar", {}).get(session)
+
+
 def _resolve_tmux_target(target: str) -> str:
     """Return target if it exists; if not and exactly one session is visible, use that."""
     # has-session operates on the session name only, not window/pane suffixes.
@@ -311,7 +343,8 @@ def api_server_jars():
         jars_path = os.path.join(gdir, JARS_DIR)
         os.makedirs(jars_path, exist_ok=True)
         jars = sorted(f for f in os.listdir(jars_path) if f.endswith(".jar"))
-        return jsonify({"ok": True, "jars": jars, "jars_dir": JARS_DIR})
+        return jsonify({"ok": True, "jars": jars, "jars_dir": JARS_DIR,
+                        "last_jar": _last_jar(gdir, target.split(":")[0])})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -355,6 +388,9 @@ def api_server_start():
                 ["tmux", "new-session", "-d", "-s", session, cmd],
                 check=True, capture_output=True,
             )
+        # Also remember on start, so stops that happen outside the panel
+        # (console 'stop', crash) still leave a sensible default behind.
+        _remember_last_jar(gdir, session, jar)
         return jsonify({"ok": True})
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": str(e)}), 503
@@ -368,6 +404,13 @@ def api_server_stop():
     target = _session_target()
     if not _is_running(target):
         return jsonify({"ok": False, "error": "Server is not running"}), 409
+    # Remember the jar this server was running so the UI can preselect it
+    # next time. Best-effort: never block the stop.
+    try:
+        jar = _pane_java_info(target).get("jar")
+        _remember_last_jar(tmux_pane_path(target), target.split(":")[0], jar)
+    except Exception:
+        pass
     try:
         tmux_send("stop", target)
         return jsonify({"ok": True})
