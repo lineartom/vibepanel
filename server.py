@@ -20,6 +20,27 @@ WORLDS_DIR     = os.environ.get("WORLDS_DIR", "world-saves")
 MODS_DIR       = os.environ.get("MODS_DIR", "mods")
 MODS_SAVES_DIR = os.environ.get("MODS_SAVES_DIR", "mods-saves")
 
+def _detect_version() -> str:
+    """VERSION file (packaged builds) or git describe (dev checkouts)."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(base, "VERSION")) as fh:
+            v = fh.read().strip()
+            if v:
+                return v
+    except OSError:
+        pass
+    try:
+        return subprocess.check_output(
+            ["git", "describe", "--tags", "--always", "--dirty"],
+            cwd=base, text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+VERSION = _detect_version()
+
 _ANSI   = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _MC_FMT = re.compile(r'§[0-9a-fklmnorABCDEFKLMNOR]')
 
@@ -252,7 +273,7 @@ def _do_mod_move(src_dir: str, dst_dir: str, filename: str):
 
 @app.route("/")
 def index():
-    return render_template("index.html", tmux_target=TMUX_TARGET)
+    return render_template("index.html", tmux_target=TMUX_TARGET, version=VERSION)
 
 
 @app.route("/api/sessions")

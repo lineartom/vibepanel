@@ -1,6 +1,9 @@
 #!/bin/sh
 
-FILENAME=vibepanel-$(git describe).tar.gz
+VERSION=$(git describe)
+FILENAME=vibepanel-$VERSION.tar.gz
 
-tar -czvf "$FILENAME" -s '#^#vibepanel/#'  static templates server.py get-me-fabric.sh requirements.txt install.sh
+echo "$VERSION" > VERSION
+tar -czvf "$FILENAME" -s '#^#vibepanel/#'  static templates server.py get-me-fabric.sh requirements.txt install.sh VERSION
+rm VERSION
 tar -tf "$FILENAME"

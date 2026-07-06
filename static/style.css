@@ -87,6 +87,12 @@ a { text-decoration: none; color: inherit; }
 
 .nav-footer { margin-top: auto; }
 
+.nav-version {
+  margin-top: .4rem;
+  font-size: .68rem;
+  color: var(--text3);
+}
+
 /* Bottom nav (mobile only) */
 #bottom-nav {
   display: none;
@@ -399,6 +405,13 @@ a { text-decoration: none; color: inherit; }
 .jar-item:last-child { border-bottom: none; }
 .jar-item:hover { background: var(--bg2); }
 .jar-item.selected { background: var(--green-bg); }
+
+/* Start section grayed out while the server is running */
+#srv-start-section.srv-start-disabled { opacity: .5; }
+#srv-start-section.srv-start-disabled .jar-item {
+  cursor: default;
+  pointer-events: none;
+}
 
 .jar-radio {
   width: 16px; height: 16px;

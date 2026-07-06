@@ -668,6 +668,7 @@ async function loadServerStatus() {
     card.innerHTML = `<p class="hint">Could not reach server.</p>`;
     return;
   }
+  const startSec = $('srv-start-section');
   if (data.running) {
     card.innerHTML = `
       <div class="srv-status-row">
@@ -676,7 +677,11 @@ async function loadServerStatus() {
         <button id="btn-stop" class="btn btn-danger btn-sm">&#x25A0; Stop</button>
       </div>
       ${data.jar ? `<div class="srv-jar">${esc(data.jar)}</div>` : ''}`;
-    $('srv-start-section').hidden = true;
+    // Keep the start section visible but grayed out and inert.
+    startSec.hidden = false;
+    startSec.classList.add('srv-start-disabled');
+    $('btn-start').disabled = true;
+    $('mem-input').disabled = true;
     $('btn-stop').addEventListener('click', stopServer);
   } else {
     card.innerHTML = `
@@ -690,8 +695,10 @@ async function loadServerStatus() {
       jarsLoaded = false;
       loadJars();
     }
-    $('srv-start-section').hidden = false;
+    startSec.hidden = false;
+    startSec.classList.remove('srv-start-disabled');
     $('btn-start').disabled = !selectedJar;
+    $('mem-input').disabled = false;
   }
 }
 
@@ -748,6 +755,7 @@ async function loadJars() {
 }
 
 function selectJar(jar) {
+  if (serverRunning === true) return;   // list is visible but inert while running
   selectedJar = jar;
   $('jar-list-wrap').querySelectorAll('.jar-item').forEach(el => {
     el.classList.toggle('selected', el.dataset.jar === jar);
