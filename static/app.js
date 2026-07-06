@@ -661,6 +661,7 @@ function srvStopPolling() {
 
 async function loadServerStatus() {
   const card = $('srv-status-card');
+  const wasRunning = serverRunning;
   const data = await fetchServerRunning();
 
   if (!data) {
@@ -683,6 +684,12 @@ async function loadServerStatus() {
         <span class="srv-dot stopped"></span>
         <span class="srv-status-label">Stopped</span>
       </div>`;
+    // On running → stopped, re-fetch the jar list so the just-saved
+    // last-used jar becomes the preselected default.
+    if (wasRunning === true) {
+      jarsLoaded = false;
+      loadJars();
+    }
     $('srv-start-section').hidden = false;
     $('btn-start').disabled = !selectedJar;
   }
