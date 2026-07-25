@@ -58,9 +58,21 @@ server to rewrite its files before re-reading the roster.
 `_resolve_uuid()` supplies UUIDs for stopped-mode writes, in this order: the UUID the
 admin typed/pasted → existing json entries → `logs/latest.log`. **Never add an online
 lookup here.** The panel talks only to its own tmux server and its own files, so a
-player who has never joined can be added only by pasting their UUID (the Add form
-exposes a UUID field for exactly that) or by starting the server and letting it resolve
-the name over the console.
+player who has never joined can be added only by pasting their UUID or by starting the
+server and letting it resolve the name over the console. The Add form reflects that:
+with the server stopped the UUID field is required and validated client-side; with it
+running the field is disabled and its placeholder says the server resolves the UUID.
+
+### Diagnosing an empty roster
+
+`/api/players/roster` returns `game_dir`, `files` (which of the three json files exist),
+and `log_found`, and the empty state renders them. An empty roster is far more often a
+game dir resolved to the wrong place than a genuinely empty whitelist — note that
+`tmux_pane_path()` follows the *foreground* process, so a pane whose shell sits
+somewhere other than the game dir resolves differently while the server is stopped than
+it does while java is running. `/api/server/status` carries an `ok` flag for the same
+reason: an unreachable tmux pane and an idle one both report `running: false`, and the
+UI has to be able to tell them apart.
 
 Names are validated against `^[A-Za-z0-9_]{1,16}$` before ever reaching a console
 command; ban reasons are stripped of control characters like `/api/say` does.

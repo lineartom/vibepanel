@@ -215,8 +215,8 @@ let loadingPlayers = false;
 let onlineData     = null;   // last /api/players response
 let rosterData     = null;   // last /api/players/roster response
 
-const NAME_RE = /^[A-Za-z0-9_]{1,16}$/;
-// Dashed or bare 32-hex, matching what the server accepts.
+// Dashed or bare 32-hex, matching what the server accepts. Usernames are left to
+// the admin — the server still validates them before they reach a console command.
 const UUID_RE = /^([0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
 
 function emptyState(icon, text) {
@@ -264,6 +264,11 @@ function rosterByName() {
 function renderOnline() {
   const el = $('players-online');
 
+  if (serverError) {
+    $('players-online-title').hidden = true;
+    el.innerHTML = `<p class="hint fb-error">&#x26A0;&#xFE0F; ${esc(serverError)}</p>`;
+    return;
+  }
   // Stopped: collapse the section to one line so the roster stays above the fold.
   if (serverRunning === false) {
     $('players-online-title').hidden = true;
@@ -350,8 +355,19 @@ function renderRoster() {
   $('roster-count').textContent = `(${players.length})`;
 
   if (players.length === 0) {
-    rosterEl.innerHTML = emptyState('&#x1F4C4;',
-      'No players in whitelist.json, ops.json, or banned-players.json yet.');
+    // An empty roster usually means we resolved the wrong game directory, so say
+    // which one we read and which files were actually there.
+    const files   = rosterData.files || {};
+    const present = Object.keys(files).filter(f => files[f]);
+    const missing = Object.keys(files).filter(f => !files[f]);
+    rosterEl.innerHTML = `
+      <div class="empty-state empty-state--compact">
+        <div class="empty-icon">&#x1F4C4;</div>
+        <p>${present.length ? 'No entries in the player lists.' : 'No player lists found.'}</p>
+        <p class="empty-detail">Read from <span class="mono">${esc(rosterData.game_dir || 'unknown')}</span></p>
+        ${missing.length ? `<p class="empty-detail">Missing there: ${
+          missing.map(f => `<span class="mono">${esc(f)}</span>`).join(', ')}</p>` : ''}
+      </div>`;
   } else {
     const onlineNames = new Set(
       (onlineData?.ok ? onlineData.players : []).map(n => n.toLowerCase()));
@@ -392,7 +408,10 @@ function renderRoster() {
   $('suggest-count').textContent = `(${sugg.length})`;
 
   if (sugg.length === 0) {
-    suggestEl.innerHTML = `<p class="hint">No new players found in the recent logs.</p>`;
+    suggestEl.innerHTML = rosterData.log_found
+      ? `<p class="hint">No new players in <span class="mono">logs/latest.log</span>.</p>`
+      : `<p class="hint">No <span class="mono">logs/latest.log</span> under
+         <span class="mono">${esc(rosterData.game_dir || 'the game directory')}</span>.</p>`;
   } else {
     suggestEl.innerHTML = '<div class="player-list">' + sugg.map(s => {
       const attrs = `data-name="${esc(s.name)}" data-uuid="${esc(s.uuid)}"`;
@@ -490,15 +509,21 @@ async function addPlayer() {
   const name      = input.value.trim();
   const uuid      = uuidInput.value.trim();
 
-  if (!NAME_RE.test(name)) {
-    fb.textContent = 'Usernames are 1–16 characters, letters/digits/underscore only.';
-    fb.className   = 'fb-error';
-    return;
-  }
-  if (uuid && !UUID_RE.test(uuid)) {
-    fb.textContent = 'That UUID doesn’t look right — expected 32 hex digits, dashes optional.';
-    fb.className   = 'fb-error';
-    return;
+  if (!name) return;   // nothing typed yet; the server validates the name itself
+
+  // With the server stopped there is nothing that can resolve a name, so the
+  // admin has to supply the UUID.
+  if (serverRunning !== true) {
+    if (!uuid) {
+      fb.textContent = 'Enter the player’s UUID — with the server stopped there’s nothing to look it up with.';
+      fb.className   = 'fb-error';
+      return;
+    }
+    if (!UUID_RE.test(uuid)) {
+      fb.textContent = 'That UUID doesn’t look right — expected 32 hex digits, dashes optional.';
+      fb.className   = 'fb-error';
+      return;
+    }
   }
 
   btn.disabled = true;
@@ -623,6 +648,7 @@ function renderHistory() {
 // ── Server running state (shared across pages) ───────────
 
 let serverRunning = null;
+let serverError   = null;   // set when the tmux pane itself can't be reached
 
 async function fetchServerRunning() {
   try {
@@ -630,6 +656,8 @@ async function fetchServerRunning() {
     const data = await res.json();
     const changed = serverRunning !== data.running;
     serverRunning = data.running;
+    serverError   = data.ok === false
+      ? (data.error || 'Could not reach the tmux session.') : null;
     applyServerRunningState();
     // Player edits go via console when up and via json files when down, so a
     // transition changes what the page can do — reload it.
@@ -644,27 +672,11 @@ function applyServerRunningState() {
   const offline = serverRunning === false;
   const running = serverRunning === true;
 
-  // Players: explain where edits land, and show the offline state for online list
-  const modeNote = $('players-mode-note');
-  const addHint  = $('add-player-hint');
-  const addUuid  = $('add-player-uuid');
-  if (running) {
-    modeNote.textContent = 'Server is running — player changes are applied live through the console.';
-    modeNote.hidden = false;
-    // The running server resolves names itself, so a typed UUID would be ignored.
-    addUuid.disabled = true;
-    addHint.textContent = 'The running server resolves the UUID itself.';
-  } else if (offline) {
-    modeNote.textContent = 'Server is stopped — player changes are written straight to whitelist.json / ops.json / banned-players.json.';
-    modeNote.hidden = false;
-    addUuid.disabled = false;
-    addHint.textContent = 'UUID is looked up in logs/latest.log and the existing player lists. '
-                        + 'For a player who has never joined, paste their UUID.';
-  } else {
-    modeNote.hidden  = true;
-    addUuid.disabled = false;
-    addHint.textContent = '';
-  }
+  // Players: a running server resolves names itself, so the UUID box is inert and
+  // says so; with it stopped we have no way to look a name up, so the UUID is required.
+  const addUuid = $('add-player-uuid');
+  addUuid.disabled    = running;
+  addUuid.placeholder = running ? 'The running server resolves the UUID itself.' : 'UUID…';
   if (offline) renderOnline();
 
   // Say: disable inputs and show notice

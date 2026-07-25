@@ -200,8 +200,6 @@
       </header>
 
       <div id="players-body">
-        <p id="players-mode-note" class="players-mode-note" hidden></p>
-
         <!-- Online -->
         <h2 class="section-title" id="players-online-title">Online</h2>
         <div id="players-online">
@@ -216,14 +214,14 @@
           <div class="add-player-row">
             <input id="add-player-name" class="mem-input add-player-input" type="text"
                    placeholder="Username&hellip;" autocomplete="off" spellcheck="false" maxlength="16">
+            <!-- placeholder is set from the running state; see applyServerRunningState -->
             <input id="add-player-uuid" class="mem-input add-uuid-input" type="text"
-                   placeholder="UUID (optional)&hellip;" autocomplete="off" spellcheck="false" maxlength="36">
+                   placeholder="UUID&hellip;" autocomplete="off" spellcheck="false" maxlength="36">
             <label class="checkbox-label">
               <input id="add-player-op" type="checkbox"> Also make OP
             </label>
             <button id="btn-add-player" class="btn btn-primary">&plus; Add</button>
           </div>
-          <p id="add-player-hint" class="hint add-player-hint"></p>
           <div id="add-player-feedback" aria-live="polite"></div>
         </div>
 

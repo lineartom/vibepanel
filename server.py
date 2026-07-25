@@ -585,12 +585,19 @@ def api_players_roster():
         ]
 
         props = _read_server_properties(gdir)
+        # Report where we looked and what was there. An empty roster is almost always
+        # a wrong game dir (the pane sitting somewhere else), not an empty whitelist,
+        # and without this the page can only say "no players" and look broken.
         return jsonify({
             "ok":                True,
             "players":           sorted(players.values(),
                                         key=lambda e: str(e["name"] or "").lower()),
             "suggestions":       suggestions,
             "whitelist_enabled": props.get("white-list", "").lower() == "true",
+            "game_dir":          gdir,
+            "files":             {f: os.path.isfile(os.path.join(gdir, f))
+                                  for f in (WHITELIST_FILE, OPS_FILE, BANNED_FILE)},
+            "log_found":         os.path.isfile(os.path.join(gdir, LOGS_DIR, LATEST_LOG)),
             "running":           _is_running(target),
         })
     except Exception as e:
@@ -764,14 +771,20 @@ def api_say():
 
 @app.route("/api/server/status")
 def api_server_status():
-    """Detect whether a Minecraft server process is running inside our tmux pane."""
+    """Detect whether a Minecraft server process is running inside our tmux pane.
+
+    `ok` distinguishes "the server is stopped" from "we can't see the pane at all" —
+    both report running=False, and conflating them makes an unreachable session look
+    like an idle one.
+    """
     target = _session_target()
     try:
-        return jsonify(_pane_java_info(target))
+        return jsonify({**_pane_java_info(target), "ok": True})
     except subprocess.CalledProcessError:
-        return jsonify({"running": False})
+        return jsonify({"running": False, "ok": False,
+                        "error": f"tmux target '{target}' not found"})
     except Exception as e:
-        return jsonify({"running": False, "error": str(e)})
+        return jsonify({"running": False, "ok": False, "error": str(e)})
 
 
 @app.route("/api/server/jars")

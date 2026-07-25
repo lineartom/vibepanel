@@ -294,13 +294,6 @@ a { text-decoration: none; color: inherit; }
   gap: .6rem;
 }
 
-.players-mode-note {
-  font-size: .8rem;
-  color: var(--text2);
-  border-left: 2px solid var(--border);
-  padding-left: .6rem;
-}
-
 #players-op-feedback, #add-player-feedback { font-size: .85rem; }
 /* Collapse rather than reserve space, so the sections stay tight when idle */
 #players-op-feedback:empty, #add-player-feedback:empty { display: none; }
@@ -316,9 +309,15 @@ a { text-decoration: none; color: inherit; }
    declared further down the file. */
 .add-player-row .add-player-input { width: 12rem; }
 .add-player-row .add-uuid-input   { width: 22rem; font-size: .78rem; }
-.add-player-row .add-uuid-input:disabled { opacity: .4; cursor: not-allowed; }
-.add-player-hint { padding: 0; font-size: .78rem; }
-.add-player-hint:empty { display: none; }
+/* Disabled, the box still has to carry a readable sentence — keep the placeholder
+   legible and drop the monospace it inherits from .mem-input. */
+.add-player-row .add-uuid-input:disabled {
+  cursor: not-allowed;
+  background: var(--bg1);
+  border-style: dashed;
+  font-family: inherit;
+}
+.add-player-row .add-uuid-input:disabled::placeholder { color: var(--text2); }
 
 .checkbox-label {
   display: inline-flex;
@@ -338,6 +337,14 @@ a { text-decoration: none; color: inherit; }
 }
 .empty-icon { font-size: 2.5rem; margin-bottom: .5rem; }
 .empty-state p { font-size: .9rem; }
+.empty-state--compact { padding: 1.5rem 1rem; }
+.empty-detail { font-size: .8rem; color: var(--text3); margin-top: .25rem; }
+
+.mono {
+  font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  font-size: .95em;
+  word-break: break-all;
+}
 
 .hint { color: var(--text2); font-size: .9rem; padding: .5rem 0; }
 
