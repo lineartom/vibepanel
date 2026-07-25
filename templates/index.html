@@ -193,10 +193,49 @@
     <section id="page-players" class="page">
       <header class="page-header">
         <h1>Players</h1>
-        <button id="btn-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+        <div class="page-header-right">
+          <span id="whitelist-state" class="badge badge-neutral" hidden></span>
+          <button id="btn-refresh" class="btn btn-ghost">&#x21BA; Refresh</button>
+        </div>
       </header>
+
       <div id="players-body">
-        <p class="hint">Hit Refresh to query the server.</p>
+        <p id="players-mode-note" class="players-mode-note" hidden></p>
+
+        <!-- Online -->
+        <h2 class="section-title" id="players-online-title">Online</h2>
+        <div id="players-online">
+          <p class="hint">Loading&hellip;</p>
+        </div>
+
+        <div id="players-op-feedback" aria-live="polite"></div>
+
+        <!-- Add a player -->
+        <div class="card add-player-card">
+          <div class="field-label">Add Player <span class="muted">(to the whitelist)</span></div>
+          <div class="add-player-row">
+            <input id="add-player-name" class="mem-input add-player-input" type="text"
+                   placeholder="Username&hellip;" autocomplete="off" spellcheck="false" maxlength="16">
+            <input id="add-player-uuid" class="mem-input add-uuid-input" type="text"
+                   placeholder="UUID (optional)&hellip;" autocomplete="off" spellcheck="false" maxlength="36">
+            <label class="checkbox-label">
+              <input id="add-player-op" type="checkbox"> Also make OP
+            </label>
+            <button id="btn-add-player" class="btn btn-primary">&plus; Add</button>
+          </div>
+          <p id="add-player-hint" class="hint add-player-hint"></p>
+          <div id="add-player-feedback" aria-live="polite"></div>
+        </div>
+
+        <!-- Roster -->
+        <h2 class="section-title">Roster <span id="roster-count" class="mod-count"></span></h2>
+        <div id="roster-list"><p class="hint">Loading&hellip;</p></div>
+
+        <!-- Suggestions from logs -->
+        <h2 class="section-title">
+          Seen In Recent Logs <span id="suggest-count" class="mod-count"></span>
+        </h2>
+        <div id="suggest-list"><p class="hint">Loading&hellip;</p></div>
       </div>
     </section>
 

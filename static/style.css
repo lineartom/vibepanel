@@ -229,7 +229,107 @@ a { text-decoration: none; color: inherit; }
   font-size: 1.1rem;
   flex-shrink: 0;
 }
-.player-name { font-weight: 500; }
+.player-name {
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  flex-wrap: wrap;
+}
+
+/* Roster rows carry a second line of detail plus action buttons */
+.player-row--roster { align-items: flex-start; }
+.player-row--roster .player-face { margin-top: 2px; }
+.player-item-info { flex: 1; min-width: 0; }
+.player-uuid {
+  font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  font-size: .72rem;
+  color: var(--text3);
+  word-break: break-all;
+}
+.player-ban-reason {
+  font-size: .76rem;
+  color: var(--red);
+  margin-top: .15rem;
+}
+.player-seen {
+  font-size: .76rem;
+  color: var(--text2);
+  margin-top: .15rem;
+}
+.player-seen .mono {
+  font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
+  color: var(--text3);
+}
+.player-actions {
+  display: flex;
+  gap: .35rem;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* ── Badges ─────────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: .05rem .4rem;
+  border-radius: 999px;
+  font-size: .68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.badge-op      { background: rgba(210,153,34,.14); color: #d29922; border-color: rgba(210,153,34,.35); }
+.badge-white   { background: rgba(88,166,255,.12); color: var(--blue); border-color: rgba(88,166,255,.32); }
+.badge-ban     { background: rgba(248,81,73,.1);   color: var(--red);  border-color: rgba(248,81,73,.3); }
+.badge-online  { background: var(--green-bg);      color: var(--green); border-color: rgba(63,185,80,.35); }
+.badge-neutral { background: var(--bg2);           color: var(--text2); border-color: var(--border); }
+
+/* ── Players page: header, notes, add form ──────────────── */
+.page-header-right {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+}
+
+.players-mode-note {
+  font-size: .8rem;
+  color: var(--text2);
+  border-left: 2px solid var(--border);
+  padding-left: .6rem;
+}
+
+#players-op-feedback, #add-player-feedback { font-size: .85rem; }
+/* Collapse rather than reserve space, so the sections stay tight when idle */
+#players-op-feedback:empty, #add-player-feedback:empty { display: none; }
+
+.add-player-card { flex-shrink: 0; gap: .5rem; }
+.add-player-row {
+  display: flex;
+  gap: .6rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+/* Qualified with the row so these win over .mem-input's width, which is
+   declared further down the file. */
+.add-player-row .add-player-input { width: 12rem; }
+.add-player-row .add-uuid-input   { width: 22rem; font-size: .78rem; }
+.add-player-row .add-uuid-input:disabled { opacity: .4; cursor: not-allowed; }
+.add-player-hint { padding: 0; font-size: .78rem; }
+.add-player-hint:empty { display: none; }
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  font-size: .85rem;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+}
+.checkbox-label input { accent-color: var(--green); cursor: pointer; }
 
 .empty-state {
   text-align: center;
@@ -826,4 +926,13 @@ a { text-decoration: none; color: inherit; }
   #session-tabs { padding: .4rem .75rem .3rem; }
   .page { padding: .9rem 1rem; }
   .terminal { font-size: .74rem; }
+
+  .player-row--roster { flex-wrap: wrap; }
+  .player-actions {
+    width: 100%;
+    justify-content: flex-start;
+    margin-top: .4rem;
+  }
+  .add-player-row .add-player-input,
+  .add-player-row .add-uuid-input { width: 100%; }
 }

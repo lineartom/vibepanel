@@ -141,7 +141,7 @@ function navigate(page) {
 
 function runPageEnterHooks(page) {
   if (page === 'overview') overviewStartPolling();
-  if (page === 'players')  fetchServerRunning().then(() => { if (serverRunning !== false) loadPlayers(); });
+  if (page === 'players')  fetchServerRunning().then(() => loadPlayers());
   if (page === 'say')      fetchServerRunning();
   if (page === 'server')   srvStartPolling();
   if (page === 'mods')     { fetchServerRunning(); loadMods(); loadSystemStats().then(() => renderDiskInfo('mods-disk-info')); }
@@ -210,69 +210,335 @@ function initConsole() {
 
 // ── Players ──────────────────────────────────────────────
 
-const playersBody  = $('players-body');
 const btnRefresh   = $('btn-refresh');
 let loadingPlayers = false;
+let onlineData     = null;   // last /api/players response
+let rosterData     = null;   // last /api/players/roster response
+
+const NAME_RE = /^[A-Za-z0-9_]{1,16}$/;
+// Dashed or bare 32-hex, matching what the server accepts.
+const UUID_RE = /^([0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+
+function emptyState(icon, text) {
+  return `
+    <div class="empty-state">
+      <div class="empty-icon">${icon}</div>
+      <p>${esc(text)}</p>
+    </div>`;
+}
 
 async function loadPlayers() {
   if (loadingPlayers) return;
   loadingPlayers = true;
   btnRefresh.disabled = true;
   btnRefresh.textContent = 'Loading…';
-  playersBody.innerHTML = '<p class="hint">Querying server…</p>';
+  await Promise.all([loadOnline(), loadRoster()]);
+  loadingPlayers = false;
+  btnRefresh.disabled = false;
+  btnRefresh.textContent = '↺ Refresh';
+}
 
+// ── Online ───────────────────────────────────────────────
+
+async function loadOnline() {
+  if (serverRunning === false) { onlineData = null; renderOnline(); return; }
+  $('players-online').innerHTML = '<p class="hint">Querying server…</p>';
   try {
-    const res  = await fetch(api('/api/players'));
-    const data = await res.json();
-
-    if (!data.ok) {
-      playersBody.innerHTML = `
-        <div class="empty-state">
-          <div class="empty-icon">&#x26A0;&#xFE0F;</div>
-          <p>${esc(data.error || 'Unknown error')}</p>
-        </div>`;
-      return;
-    }
-
-    let html = `
-      <div class="players-stat">
-        <span class="players-num">${data.count}</span>
-        <span class="players-denom">/ ${data.max} online</span>
-      </div>`;
-
-    if (data.count === 0) {
-      html += `
-        <div class="empty-state">
-          <div class="empty-icon">&#x1F634;</div>
-          <p>No players currently online</p>
-        </div>`;
-    } else {
-      html += '<div class="player-list">';
-      data.players.forEach(name => {
-        html += `
-          <div class="player-row">
-            <div class="player-face">&#x1F9D1;</div>
-            <span class="player-name">${esc(name)}</span>
-          </div>`;
-      });
-      html += '</div>';
-    }
-
-    playersBody.innerHTML = html;
+    const res = await fetch(api('/api/players'));
+    onlineData = await res.json();
   } catch (err) {
-    playersBody.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">&#x26A0;&#xFE0F;</div>
-        <p>Network error: ${esc(err.message)}</p>
-      </div>`;
-  } finally {
-    loadingPlayers = false;
-    btnRefresh.disabled = serverRunning === false;
-    btnRefresh.textContent = '↺ Refresh';
+    onlineData = { ok: false, error: `Network error: ${err.message}` };
+  }
+  renderOnline();
+}
+
+// Name → roster entry, so online rows can show UUID and badges too.
+function rosterByName() {
+  const map = {};
+  (rosterData?.players || []).forEach(p => {
+    if (p.name) map[String(p.name).toLowerCase()] = p;
+  });
+  return map;
+}
+
+function renderOnline() {
+  const el = $('players-online');
+
+  // Stopped: collapse the section to one line so the roster stays above the fold.
+  if (serverRunning === false) {
+    $('players-online-title').hidden = true;
+    el.innerHTML = '<p class="hint">&#x26D4; Nobody online — the server is stopped.</p>';
+    return;
+  }
+  $('players-online-title').hidden = false;
+  if (!onlineData)      { el.innerHTML = '<p class="hint">Querying server…</p>'; return; }
+  if (!onlineData.ok)   { el.innerHTML = emptyState('&#x26A0;&#xFE0F;', onlineData.error || 'Unknown error'); return; }
+
+  let html = `
+    <div class="players-stat">
+      <span class="players-num">${onlineData.count}</span>
+      <span class="players-denom">/ ${onlineData.max} online</span>
+    </div>`;
+
+  if (onlineData.count === 0) {
+    html += emptyState('&#x1F634;', 'No players currently online');
+  } else {
+    const known = rosterByName();
+    html += '<div class="player-list">';
+    onlineData.players.forEach(name => {
+      const p = known[name.toLowerCase()];
+      html += `
+        <div class="player-row">
+          <div class="player-face">${p?.op ? '&#x1F451;' : '&#x1F9D1;'}</div>
+          <div class="player-item-info">
+            <div class="player-name">${esc(name)} ${playerBadges(p)}</div>
+            ${p?.uuid ? `<div class="player-uuid">${esc(p.uuid)}</div>` : ''}
+          </div>
+        </div>`;
+    });
+    html += '</div>';
+  }
+  el.innerHTML = html;
+}
+
+// ── Roster ───────────────────────────────────────────────
+
+function playerBadges(p) {
+  if (!p) return '';
+  let html = '';
+  if (p.op) {
+    const lvl = p.op_level != null ? ` ${p.op_level}` : '';
+    html += `<span class="badge badge-op">OP${esc(lvl)}</span>`;
+  }
+  if (p.whitelisted) html += `<span class="badge badge-white">Whitelist</span>`;
+  if (p.banned)      html += `<span class="badge badge-ban">Banned</span>`;
+  return html;
+}
+
+async function loadRoster() {
+  try {
+    const res = await fetch(api('/api/players/roster'));
+    rosterData = await res.json();
+  } catch (err) {
+    rosterData = { ok: false, error: `Network error: ${err.message}` };
+  }
+  renderRoster();
+  renderOnline();   // badges/UUIDs for online rows come from the roster
+}
+
+function renderRoster() {
+  const rosterEl  = $('roster-list');
+  const suggestEl = $('suggest-list');
+  const wlBadge   = $('whitelist-state');
+
+  if (!rosterData?.ok) {
+    const msg = `<p class="hint">Error: ${esc(rosterData?.error || 'Unknown error')}</p>`;
+    rosterEl.innerHTML  = msg;
+    suggestEl.innerHTML = msg;
+    wlBadge.hidden = true;
+    $('roster-count').textContent  = '';
+    $('suggest-count').textContent = '';
+    return;
+  }
+
+  wlBadge.hidden      = false;
+  wlBadge.textContent = rosterData.whitelist_enabled ? 'Whitelist on' : 'Whitelist off';
+  wlBadge.className   = 'badge ' + (rosterData.whitelist_enabled ? 'badge-white' : 'badge-neutral');
+
+  // Roster
+  const players = rosterData.players || [];
+  $('roster-count').textContent = `(${players.length})`;
+
+  if (players.length === 0) {
+    rosterEl.innerHTML = emptyState('&#x1F4C4;',
+      'No players in whitelist.json, ops.json, or banned-players.json yet.');
+  } else {
+    const onlineNames = new Set(
+      (onlineData?.ok ? onlineData.players : []).map(n => n.toLowerCase()));
+
+    rosterEl.innerHTML = '<div class="player-list">' + players.map(p => {
+      const isOnline = p.name && onlineNames.has(String(p.name).toLowerCase());
+      const attrs    = `data-name="${esc(p.name || '')}" data-uuid="${esc(p.uuid || '')}"`;
+      return `
+        <div class="player-row player-row--roster">
+          <div class="player-face">${p.op ? '&#x1F451;' : p.banned ? '&#x1F6AB;' : '&#x1F9D1;'}</div>
+          <div class="player-item-info">
+            <div class="player-name">
+              ${esc(p.name || '(unknown)')}
+              ${playerBadges(p)}
+              ${isOnline ? '<span class="badge badge-online">Online</span>' : ''}
+            </div>
+            <div class="player-uuid">${esc(p.uuid || 'no UUID on record')}</div>
+            ${p.banned && p.ban_reason
+              ? `<div class="player-ban-reason">Ban reason: ${esc(p.ban_reason)}${
+                   p.ban_expires && p.ban_expires !== 'forever'
+                     ? ` &bull; expires ${esc(p.ban_expires)}` : ''}</div>`
+              : ''}
+          </div>
+          <div class="player-actions">
+            <button class="btn btn-ghost btn-sm btn-player-act" data-act="op" ${attrs}
+                    data-op="${p.op ? '0' : '1'}">${p.op ? 'De-OP' : 'Make OP'}</button>
+            ${p.banned
+              ? `<button class="btn btn-ghost btn-sm btn-player-act" data-act="pardon" ${attrs}>Unban</button>`
+              : `<button class="btn btn-danger btn-sm btn-player-act" data-act="ban" ${attrs}>Ban</button>`}
+            <button class="btn btn-ghost btn-sm btn-player-act" data-act="remove" ${attrs}>Remove</button>
+          </div>
+        </div>`;
+    }).join('') + '</div>';
+  }
+
+  // Suggestions
+  const sugg = rosterData.suggestions || [];
+  $('suggest-count').textContent = `(${sugg.length})`;
+
+  if (sugg.length === 0) {
+    suggestEl.innerHTML = `<p class="hint">No new players found in the recent logs.</p>`;
+  } else {
+    suggestEl.innerHTML = '<div class="player-list">' + sugg.map(s => {
+      const attrs = `data-name="${esc(s.name)}" data-uuid="${esc(s.uuid)}"`;
+      return `
+        <div class="player-row player-row--roster">
+          <div class="player-face">&#x1F50D;</div>
+          <div class="player-item-info">
+            <div class="player-name">${esc(s.name)}</div>
+            <div class="player-uuid">${esc(s.uuid)}</div>
+            <div class="player-seen">
+              Last seen ${esc(s.last_seen)} &bull; ${s.seen} login${s.seen !== 1 ? 's' : ''}
+            </div>
+          </div>
+          <div class="player-actions">
+            <button class="btn btn-primary btn-sm btn-player-act" data-act="add" ${attrs}>&plus; Whitelist</button>
+            <button class="btn btn-ghost btn-sm btn-player-act" data-act="add-op" ${attrs}>&plus; As OP</button>
+            <button class="btn btn-danger btn-sm btn-player-act" data-act="ban" ${attrs}>Ban</button>
+          </div>
+        </div>`;
+    }).join('') + '</div>';
+  }
+
+  document.querySelectorAll('.btn-player-act').forEach(btn => {
+    btn.addEventListener('click', () => playerAction(btn.dataset));
+  });
+}
+
+// ── Player mutations ─────────────────────────────────────
+
+function playerAction(ds) {
+  const { name, uuid, act } = ds;
+
+  if (act === 'op')     return playerMutate('/api/players/op',
+                                            { name, uuid, op: ds.op === '1' },
+                                            ds.op === '1' ? `Op'ing ${name}` : `De-op'ing ${name}`);
+  if (act === 'add')    return playerMutate('/api/players/add', { name, uuid, op: false },
+                                            `Adding ${name}`);
+  if (act === 'add-op') return playerMutate('/api/players/add', { name, uuid, op: true },
+                                            `Adding ${name} as op`);
+  if (act === 'pardon') return playerMutate('/api/players/ban', { name, uuid, ban: false },
+                                            `Pardoning ${name}`);
+  if (act === 'ban') {
+    const reason = prompt(`Ban "${name}"?\n\nOptional reason:`, 'Banned by an operator.');
+    if (reason === null) return;
+    return playerMutate('/api/players/ban', { name, uuid, ban: true, reason }, `Banning ${name}`);
+  }
+  if (act === 'remove') {
+    if (!confirm(`Remove "${name}" from the whitelist and ops?\n\nAny ban stays in place.`)) return;
+    return playerMutate('/api/players/remove', { name, uuid }, `Removing ${name}`);
   }
 }
 
+async function playerMutate(endpoint, body, label) {
+  const fb = $('players-op-feedback');
+  fb.textContent = `${label}…`;
+  fb.className   = '';
+  document.querySelectorAll('.btn-player-act').forEach(b => { b.disabled = true; });
+
+  try {
+    const res  = await fetch(api(endpoint), {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      fb.textContent = `✓ ${data.message || 'Done'}`;
+      fb.className   = 'fb-ok';
+      setTimeout(() => {
+        if (fb.className === 'fb-ok') { fb.textContent = ''; fb.className = ''; }
+      }, 5000);
+      // Console commands land asynchronously — give the server a moment to
+      // rewrite its json files before we re-read them.
+      setTimeout(() => loadPlayers(), data.via === 'console' ? 1400 : 0);
+    } else {
+      fb.textContent = `Error: ${data.error || 'Unknown error'}`;
+      fb.className   = 'fb-error';
+      loadRoster();
+    }
+  } catch (err) {
+    fb.textContent = `Network error: ${err.message}`;
+    fb.className   = 'fb-error';
+    loadRoster();
+  }
+}
+
+// ── Add player form ──────────────────────────────────────
+
+async function addPlayer() {
+  const input     = $('add-player-name');
+  const uuidInput = $('add-player-uuid');
+  const btn       = $('btn-add-player');
+  const fb        = $('add-player-feedback');
+  const name      = input.value.trim();
+  const uuid      = uuidInput.value.trim();
+
+  if (!NAME_RE.test(name)) {
+    fb.textContent = 'Usernames are 1–16 characters, letters/digits/underscore only.';
+    fb.className   = 'fb-error';
+    return;
+  }
+  if (uuid && !UUID_RE.test(uuid)) {
+    fb.textContent = 'That UUID doesn’t look right — expected 32 hex digits, dashes optional.';
+    fb.className   = 'fb-error';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+  fb.textContent  = '';
+  fb.className    = '';
+
+  try {
+    const res  = await fetch(api('/api/players/add'), {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ name, uuid, op: $('add-player-op').checked }),
+    });
+    const data = await res.json();
+
+    if (data.ok) {
+      fb.textContent = `✓ ${data.message || 'Added'}`;
+      fb.className   = 'fb-ok';
+      input.value     = '';
+      uuidInput.value = '';
+      $('add-player-op').checked = false;
+      setTimeout(() => { fb.textContent = ''; fb.className = ''; }, 5000);
+      setTimeout(() => loadPlayers(), data.via === 'console' ? 1400 : 0);
+    } else {
+      fb.textContent = `Error: ${data.error || 'Unknown error'}`;
+      fb.className   = 'fb-error';
+    }
+  } catch (err) {
+    fb.textContent = `Network error: ${err.message}`;
+    fb.className   = 'fb-error';
+  }
+  btn.disabled    = false;
+  btn.textContent = '+ Add';
+}
+
 btnRefresh.addEventListener('click', loadPlayers);
+$('btn-add-player').addEventListener('click', addPlayer);
+['add-player-name', 'add-player-uuid'].forEach(id => {
+  $(id).addEventListener('keydown', e => { if (e.key === 'Enter') addPlayer(); });
+});
 
 // ── Say ──────────────────────────────────────────────────
 
@@ -362,8 +628,12 @@ async function fetchServerRunning() {
   try {
     const res  = await fetch(api('/api/server/status'));
     const data = await res.json();
+    const changed = serverRunning !== data.running;
     serverRunning = data.running;
     applyServerRunningState();
+    // Player edits go via console when up and via json files when down, so a
+    // transition changes what the page can do — reload it.
+    if (changed && activePage === 'players') loadPlayers();
     return data;
   } catch (_) {
     return null;
@@ -374,15 +644,28 @@ function applyServerRunningState() {
   const offline = serverRunning === false;
   const running = serverRunning === true;
 
-  // Players: gate Refresh; replace hint with offline message if no real data yet
-  $('btn-refresh').disabled = offline;
-  if (offline && !$('players-body').querySelector('.players-stat')) {
-    $('players-body').innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">&#x26D4;</div>
-        <p>Server is not running.</p>
-      </div>`;
+  // Players: explain where edits land, and show the offline state for online list
+  const modeNote = $('players-mode-note');
+  const addHint  = $('add-player-hint');
+  const addUuid  = $('add-player-uuid');
+  if (running) {
+    modeNote.textContent = 'Server is running — player changes are applied live through the console.';
+    modeNote.hidden = false;
+    // The running server resolves names itself, so a typed UUID would be ignored.
+    addUuid.disabled = true;
+    addHint.textContent = 'The running server resolves the UUID itself.';
+  } else if (offline) {
+    modeNote.textContent = 'Server is stopped — player changes are written straight to whitelist.json / ops.json / banned-players.json.';
+    modeNote.hidden = false;
+    addUuid.disabled = false;
+    addHint.textContent = 'UUID is looked up in logs/latest.log and the existing player lists. '
+                        + 'For a player who has never joined, paste their UUID.';
+  } else {
+    modeNote.hidden  = true;
+    addUuid.disabled = false;
+    addHint.textContent = '';
   }
+  if (offline) renderOnline();
 
   // Say: disable inputs and show notice
   $('say-input').disabled = offline;

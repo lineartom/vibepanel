@@ -37,16 +37,60 @@ The "game directory" is resolved from the **foreground process group's CWD** ins
 
 `_is_running()` / `_pane_java_info()` use `#{pane_tty}` + `ps -t <tty> -o pid=,args=` to find a `java` process on the pane's tty. This works regardless of process tree depth — a server started as `bash start.sh` (where java is a grandchild of the shell) is detected correctly. Do **not** use `#{pane_current_command}` for this; it only returns the foreground process group leader name, which is `bash` in the wrapper-script case.
 
+## Player management (whitelist / ops / bans)
+
+`/api/players/roster` merges `whitelist.json`, `ops.json`, and `banned-players.json`
+into one list keyed by UUID (falling back to a lowercased name key when an entry has
+no usable UUID), so each player appears once with `whitelisted` / `op` / `banned` flags.
+
+Writes take one of **two paths**, chosen by `_is_running()`:
+
+- **server running** → console commands via tmux (`op`, `deop`, `whitelist add|remove`,
+  `ban`, `pardon`). The running server holds those json files in memory and rewrites
+  them on change, so editing them directly would be clobbered.
+- **server stopped** → the json files are edited in place (atomic write via `.tmp` +
+  `os.replace`). New entries use the vanilla shapes, including `level: 4` /
+  `bypassesPlayerLimit` for ops and `created` / `source` / `expires` / `reason` for bans.
+
+Responses carry `via: "console" | "file"` so the frontend knows to wait ~1.4 s for the
+server to rewrite its files before re-reading the roster.
+
+`_resolve_uuid()` supplies UUIDs for stopped-mode writes, in this order: the UUID the
+admin typed/pasted → existing json entries → `logs/latest.log`. **Never add an online
+lookup here.** The panel talks only to its own tmux server and its own files, so a
+player who has never joined can be added only by pasting their UUID (the Add form
+exposes a UUID field for exactly that) or by starting the server and letting it resolve
+the name over the console.
+
+Names are validated against `^[A-Za-z0-9_]{1,16}$` before ever reaching a console
+command; ban reasons are stripped of control characters like `/api/say` does.
+
+### Log scraping for add-suggestions
+
+`_scan_latest_log()` pulls `UUID of player <name> is <uuid>` lines out of the last
+512 KB of **`logs/latest.log` only**. Rotated logs are ignored, `.gz` and plain alike:
+stitching the tails of several files together would mean searching a history with holes
+in it, which is both slower and confusing to reason about.
+
+Log lines carry only `[HH:MM:SS]`, so dates are reconstructed: within one `latest.log`
+the clock runs forward (a restart rotates the file away), so each backwards jump is a
+midnight rollover. Count them, then date each hit by counting back from the file's
+mtime, which is the date of its last line.
+
 ## Directory layout (relative to game dir)
 
 ```
 <game-dir>/
-  server-jars/       # .jar files for starting the server  (JARS_DIR)
-  mods/              # active Fabric mods                   (MODS_DIR)
-  mods-saves/        # inactive/stashed mods                (MODS_SAVES_DIR)
-  world-saves/       # .tgz world backups                   (WORLDS_DIR)
-  get-me-fabric.sh   # auto-installed from repo root if missing
-  .vibepanel.json    # panel state: last-used jar per session (written on start/stop)
+  server-jars/         # .jar files for starting the server  (JARS_DIR)
+  mods/                # active Fabric mods                   (MODS_DIR)
+  mods-saves/          # inactive/stashed mods                (MODS_SAVES_DIR)
+  world-saves/         # .tgz world backups                   (WORLDS_DIR)
+  logs/latest.log      # scraped for player name→UUID suggestions (read-only)
+  whitelist.json       # read + written by the Players page
+  ops.json             #   "
+  banned-players.json  #   "
+  get-me-fabric.sh     # auto-installed from repo root if missing
+  .vibepanel.json      # panel state: last-used jar per session (written on start/stop)
 ```
 
 ## Dependencies

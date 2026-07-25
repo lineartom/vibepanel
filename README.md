@@ -7,7 +7,7 @@ A lightweight web frontend for a Minecraft server running in a tmux session. Man
 ## Features
 
 - **Live console** — streams tmux output in real time via Server-Sent Events
-- **Players** — lists online players via `/list`
+- **Players** — online players via `/list`, plus the full roster from `whitelist.json` / `ops.json` / `banned-players.json` with names and UUIDs; op/de-op, whitelist, remove, and ban/unban from the UI, with add-suggestions scraped from `logs/latest.log`
 - **Say** — broadcasts a message to the server as `[Server]`
 - **Mods** — toggle Fabric mods on/off (moves files between `mods/` and `mods-saves/`); detects byte-for-byte conflicts
 - **Worlds** — save, load, and delete world backups as `.tgz` archives; autosaves before loading
@@ -61,6 +61,10 @@ sudo systemctl enable --now vibepanel
 VibePanel attaches to your existing tmux pane and interacts with it directly — it sends keystrokes to start/stop the server, issues commands like `/list`, and streams pane output to the browser. It does not run the Minecraft server itself.
 
 Server-running detection uses `ps -t <pane_tty>` rather than checking the foreground process name, so servers launched via wrapper scripts (`bash start.sh`) are detected correctly.
+
+Player edits take one of two routes depending on whether the server is up. While it's running they go out as console commands (`op`, `whitelist add`, `ban`, …) because the server owns those json files in memory and would overwrite anything written behind its back. While it's stopped VibePanel edits `whitelist.json`, `ops.json`, and `banned-players.json` directly. The UI says which mode it's in.
+
+Nothing about player management reaches the network: UUIDs come from the json files, from `logs/latest.log`, or from whatever the admin pastes into the UUID field. There is no account lookup service involved.
 
 ## License
 

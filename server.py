@@ -7,7 +7,7 @@ import argparse
 import shutil
 import subprocess
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file, abort
 
 app = Flask(__name__)
@@ -314,6 +314,428 @@ def api_players():
         return jsonify({"ok": False, "error": str(e)}), 503
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── Player roster (whitelist / ops / bans) ──────────────────────────────
+#
+# Two write paths, picked by whether the server is up:
+#   running  → send console commands; the server owns the json files and would
+#              clobber any edit we made behind its back.
+#   stopped  → edit whitelist.json / ops.json / banned-players.json directly.
+
+WHITELIST_FILE = "whitelist.json"
+OPS_FILE       = "ops.json"
+BANNED_FILE    = "banned-players.json"
+LOGS_DIR       = "logs"
+LATEST_LOG     = "latest.log"
+
+# Only the tail of logs/latest.log is ever read. Rotated .gz archives are slow to
+# unpack, and stitching together the tails of several files would mean searching a
+# history with holes in it — "seen in the recent log" stays one contiguous window.
+LOG_SCAN_MAX_BYTES = 512 * 1024
+
+_MC_NAME_RE   = re.compile(r'^[A-Za-z0-9_]{1,16}$')
+_UUID_HEX_RE  = re.compile(r'^[0-9a-fA-F]{32}$')
+_UUID_DASH_RE = re.compile(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+)
+
+# "[12:34:56] [User Authenticator #1/INFO]: UUID of player Notch is 069a79f4-…"
+_LOG_PLAYER_UUID_RE = re.compile(
+    r'UUID of player (\S{1,16}) is '
+    r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'
+)
+_LOG_LINE_TIME_RE = re.compile(r'^\[(\d{2}:\d{2}:\d{2})')
+
+
+def _normalize_uuid(raw) -> str | None:
+    """Return a canonical dashed lowercase UUID, or None if unparseable."""
+    s = str(raw or "").strip().lower()
+    if _UUID_DASH_RE.match(s):
+        return s
+    if _UUID_HEX_RE.match(s):
+        return f"{s[0:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:]}"
+    return None
+
+
+def _read_json_list(path: str) -> list:
+    """Read a Minecraft json list file; [] if missing, corrupt, or wrong shape."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict)]
+
+
+def _write_json_list(path: str, entries: list) -> None:
+    """Atomically write a Minecraft json list file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(entries, fh, indent=2)
+    os.replace(tmp, path)
+
+
+def _entry_matches(entry: dict, name: str, uuid: str | None) -> bool:
+    if uuid and _normalize_uuid(entry.get("uuid")) == uuid:
+        return True
+    return str(entry.get("name", "")).lower() == name.lower()
+
+
+def _list_remove(path: str, name: str, uuid: str | None) -> bool:
+    """Drop every entry matching name or uuid. Returns True if anything changed."""
+    entries = _read_json_list(path)
+    kept    = [e for e in entries if not _entry_matches(e, name, uuid)]
+    if len(kept) == len(entries):
+        return False
+    _write_json_list(path, kept)
+    return True
+
+
+def _list_upsert(path: str, entry: dict) -> None:
+    """Insert entry, or merge it over the existing record for that player."""
+    name    = str(entry.get("name", ""))
+    uuid    = _normalize_uuid(entry.get("uuid"))
+    entries = _read_json_list(path)
+
+    out, merged = [], False
+    for e in entries:
+        if _entry_matches(e, name, uuid):
+            if not merged:                      # keep fields we don't manage
+                out.append({**e, **entry})
+                merged = True
+            continue                            # drop any duplicate records
+        out.append(e)
+    if not merged:
+        out.append(entry)
+    _write_json_list(path, out)
+
+
+def _read_server_properties(gdir: str) -> dict:
+    props = {}
+    path  = os.path.join(gdir, "server.properties")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, _, val = line.partition("=")
+                props[key.strip()] = val.strip()
+    except OSError:
+        pass
+    return props
+
+
+def _scan_latest_log(gdir: str) -> list:
+    """Scrape name→UUID pairs from the tail of logs/latest.log.
+
+    Reads at most LOG_SCAN_MAX_BYTES from the end of that one file — no rotated
+    archives — so the result is one contiguous slice of history.
+    """
+    path = os.path.join(gdir, LOGS_DIR, LATEST_LOG)
+    try:
+        mtime = os.path.getmtime(path)
+        with open(path, "rb") as fh:
+            size = os.fstat(fh.fileno()).st_size
+            if size > LOG_SCAN_MAX_BYTES:
+                fh.seek(size - LOG_SCAN_MAX_BYTES)
+            blob = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return []
+
+    # Log lines carry only [HH:MM:SS]. Within a single latest.log the clock runs
+    # forward (a restart rotates the old file away), so every backwards jump is a
+    # midnight rollover: count them, then date each hit by counting back from the
+    # file's mtime, which is the date of its last line.
+    hits, day, stamp = [], 0, None
+    for line in blob.splitlines():
+        t = _LOG_LINE_TIME_RE.match(line)
+        if t:
+            if stamp and t.group(1) < stamp:
+                day += 1
+            stamp = t.group(1)
+
+        hit = _LOG_PLAYER_UUID_RE.search(line)
+        if not hit:
+            continue
+        name = hit.group(1)
+        uuid = _normalize_uuid(hit.group(2))
+        if uuid and _MC_NAME_RE.match(name):
+            hits.append((day, stamp, name, uuid))
+
+    last_day = day
+    base     = datetime.fromtimestamp(mtime).date()
+
+    found = {}
+    for day, stamp, name, uuid in hits:
+        date = base - timedelta(days=last_day - day)
+        seen = f"{date} {stamp}" if stamp else str(date)
+        e = found.setdefault(uuid, {"name": name, "uuid": uuid,
+                                    "seen": 0, "last_seen": seen})
+        e["seen"] += 1
+        e["name"]  = name                   # newest spelling wins
+        if seen > e["last_seen"]:            # zero-padded, so string compare is fine
+            e["last_seen"] = seen
+
+    return sorted(found.values(), key=lambda e: e["last_seen"], reverse=True)
+
+
+def _resolve_uuid(gdir: str, name: str, hint: str | None) -> tuple[str | None, str | None]:
+    """Find a UUID for name without leaving the box. Returns (uuid, error_message).
+
+    Sources, in order: the UUID the admin supplied, the json files we already
+    manage, then logs/latest.log. There is deliberately no online lookup — the
+    panel never talks to anything but its own server and its own files.
+    """
+    if hint:
+        return hint, None
+
+    for fname in (WHITELIST_FILE, OPS_FILE, BANNED_FILE):
+        for e in _read_json_list(os.path.join(gdir, fname)):
+            if str(e.get("name", "")).lower() == name.lower():
+                uuid = _normalize_uuid(e.get("uuid"))
+                if uuid:
+                    return uuid, None
+
+    for s in _scan_latest_log(gdir):
+        if s["name"].lower() == name.lower():
+            return s["uuid"], None
+
+    return None, (f"No UUID on record for '{name}' — not in the player lists and not "
+                  f"in the current {LATEST_LOG}. Paste their UUID to add them anyway, "
+                  "or start the server and add them there.")
+
+
+def _parse_player_body(target: str):
+    """Validate the {name, uuid?} body common to the player endpoints.
+
+    Returns (ctx, error_response); exactly one of the two is None.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    name = str(data.get("name", "")).strip()
+    if not _MC_NAME_RE.match(name):
+        return None, (jsonify({"ok": False, "error": "Invalid player name"}), 400)
+
+    raw_uuid = str(data.get("uuid", "")).strip()
+    uuid     = _normalize_uuid(raw_uuid) if raw_uuid else None
+    if raw_uuid and not uuid:
+        return None, (jsonify({"ok": False, "error": "Invalid UUID"}), 400)
+
+    try:
+        gdir = tmux_pane_path(target)
+    except subprocess.CalledProcessError:
+        return None, (jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503)
+
+    return {"data": data, "gdir": gdir, "name": name, "uuid": uuid,
+            "running": _is_running(target)}, None
+
+
+def _console(target: str, *commands: str):
+    """Send console commands in order, pacing them so the server reads each one."""
+    for i, cmd in enumerate(commands):
+        if i:
+            time.sleep(0.3)
+        tmux_send(cmd, target)
+
+
+@app.route("/api/players/roster")
+def api_players_roster():
+    """Merged whitelist / ops / bans, plus add-suggestions scraped from logs."""
+    target = _session_target()
+    try:
+        gdir = tmux_pane_path(target)
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
+
+    try:
+        players = {}
+
+        def entry(name, uuid):
+            uuid = _normalize_uuid(uuid)
+            key  = uuid or f"name:{str(name).lower()}"
+            e = players.setdefault(key, {
+                "name": name, "uuid": uuid, "whitelisted": False,
+                "op": False, "op_level": None, "banned": False,
+                "ban_reason": None, "ban_expires": None,
+            })
+            if name:
+                e["name"] = name
+            return e
+
+        for x in _read_json_list(os.path.join(gdir, WHITELIST_FILE)):
+            entry(x.get("name"), x.get("uuid"))["whitelisted"] = True
+        for x in _read_json_list(os.path.join(gdir, OPS_FILE)):
+            e = entry(x.get("name"), x.get("uuid"))
+            e["op"]       = True
+            e["op_level"] = x.get("level")
+        for x in _read_json_list(os.path.join(gdir, BANNED_FILE)):
+            e = entry(x.get("name"), x.get("uuid"))
+            e["banned"]      = True
+            e["ban_reason"]  = x.get("reason")
+            e["ban_expires"] = x.get("expires")
+
+        known_uuids = {e["uuid"] for e in players.values() if e["uuid"]}
+        known_names = {str(e["name"]).lower() for e in players.values() if e["name"]}
+        suggestions = [
+            s for s in _scan_latest_log(gdir)
+            if s["uuid"] not in known_uuids and s["name"].lower() not in known_names
+        ]
+
+        props = _read_server_properties(gdir)
+        return jsonify({
+            "ok":                True,
+            "players":           sorted(players.values(),
+                                        key=lambda e: str(e["name"] or "").lower()),
+            "suggestions":       suggestions,
+            "whitelist_enabled": props.get("white-list", "").lower() == "true",
+            "running":           _is_running(target),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/players/add", methods=["POST"])
+def api_players_add():
+    """Whitelist a player (optionally op'ing them at the same time)."""
+    target = _session_target()
+    ctx, err = _parse_player_body(target)
+    if err:
+        return err
+    name   = ctx["name"]
+    add_op = bool(ctx["data"].get("op"))
+
+    if ctx["running"]:
+        cmds = [f"whitelist add {name}"] + ([f"op {name}"] if add_op else [])
+        try:
+            _console(target, *cmds)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"ok": False, "error": str(e)}), 503
+        return jsonify({"ok": True, "via": "console",
+                        "message": f"Added {name} to the whitelist" + (" as an op" if add_op else "")})
+
+    uuid, e = _resolve_uuid(ctx["gdir"], name, ctx["uuid"])
+    if not uuid:
+        return jsonify({"ok": False, "error": e}), 400
+    try:
+        _list_upsert(os.path.join(ctx["gdir"], WHITELIST_FILE), {"uuid": uuid, "name": name})
+        if add_op:
+            _list_upsert(os.path.join(ctx["gdir"], OPS_FILE), {
+                "uuid": uuid, "name": name, "level": 4, "bypassesPlayerLimit": False,
+            })
+    except OSError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True, "via": "file",
+                    "message": f"Added {name} to {WHITELIST_FILE}" + (f" and {OPS_FILE}" if add_op else "")})
+
+
+@app.route("/api/players/op", methods=["POST"])
+def api_players_op():
+    """Grant or revoke operator status."""
+    target = _session_target()
+    ctx, err = _parse_player_body(target)
+    if err:
+        return err
+    name    = ctx["name"]
+    want_op = bool(ctx["data"].get("op", True))
+
+    if ctx["running"]:
+        try:
+            _console(target, f"{'op' if want_op else 'deop'} {name}")
+        except subprocess.CalledProcessError as e:
+            return jsonify({"ok": False, "error": str(e)}), 503
+        return jsonify({"ok": True, "via": "console",
+                        "message": f"{'Op' if want_op else 'De-op'}'d {name}"})
+
+    ops_path = os.path.join(ctx["gdir"], OPS_FILE)
+    try:
+        if want_op:
+            uuid, e = _resolve_uuid(ctx["gdir"], name, ctx["uuid"])
+            if not uuid:
+                return jsonify({"ok": False, "error": e}), 400
+            _list_upsert(ops_path, {"uuid": uuid, "name": name,
+                                    "level": 4, "bypassesPlayerLimit": False})
+        else:
+            _list_remove(ops_path, name, ctx["uuid"])
+    except OSError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True, "via": "file",
+                    "message": f"{'Op' if want_op else 'De-op'}'d {name} in {OPS_FILE}"})
+
+
+@app.route("/api/players/remove", methods=["POST"])
+def api_players_remove():
+    """Forget a player: de-op and drop them from the whitelist. Bans are untouched."""
+    target = _session_target()
+    ctx, err = _parse_player_body(target)
+    if err:
+        return err
+    name = ctx["name"]
+
+    if ctx["running"]:
+        try:
+            _console(target, f"deop {name}", f"whitelist remove {name}")
+        except subprocess.CalledProcessError as e:
+            return jsonify({"ok": False, "error": str(e)}), 503
+        return jsonify({"ok": True, "via": "console",
+                        "message": f"Removed {name} from the whitelist and ops"})
+
+    try:
+        removed = any([
+            _list_remove(os.path.join(ctx["gdir"], OPS_FILE), name, ctx["uuid"]),
+            _list_remove(os.path.join(ctx["gdir"], WHITELIST_FILE), name, ctx["uuid"]),
+        ])
+    except OSError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True, "via": "file",
+                    "message": f"Removed {name}" if removed else f"{name} was not listed"})
+
+
+@app.route("/api/players/ban", methods=["POST"])
+def api_players_ban():
+    """Ban (block) or pardon a player."""
+    target = _session_target()
+    ctx, err = _parse_player_body(target)
+    if err:
+        return err
+    name = ctx["name"]
+    ban  = bool(ctx["data"].get("ban", True))
+    # Control characters would reach the server's stdin through the pty and could
+    # signal the foreground process; strip them exactly like /api/say does.
+    reason = re.sub(r'[\x00-\x1f\x7f-\x9f]', '',
+                    str(ctx["data"].get("reason", "")).strip())[:120]
+
+    if ctx["running"]:
+        cmd = (f"ban {name} {reason}".strip() if ban else f"pardon {name}")
+        try:
+            _console(target, cmd)
+        except subprocess.CalledProcessError as e:
+            return jsonify({"ok": False, "error": str(e)}), 503
+        return jsonify({"ok": True, "via": "console",
+                        "message": f"{'Banned' if ban else 'Pardoned'} {name}"})
+
+    banned_path = os.path.join(ctx["gdir"], BANNED_FILE)
+    try:
+        if ban:
+            uuid, e = _resolve_uuid(ctx["gdir"], name, ctx["uuid"])
+            if not uuid:
+                return jsonify({"ok": False, "error": e}), 400
+            _list_upsert(banned_path, {
+                "uuid":    uuid,
+                "name":    name,
+                "created": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z"),
+                "source":  "VibePanel",
+                "expires": "forever",
+                "reason":  reason or "Banned by an operator.",
+            })
+        else:
+            _list_remove(banned_path, name, ctx["uuid"])
+    except OSError as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True, "via": "file",
+                    "message": f"{'Banned' if ban else 'Pardoned'} {name} in {BANNED_FILE}"})
 
 
 @app.route("/api/say", methods=["POST"])
