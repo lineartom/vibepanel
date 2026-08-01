@@ -184,6 +184,11 @@ function resetSessionUi() {
 
   onlineData = null;
   rosterData = null;
+  // Scrolled up reading the old server's console? That position means nothing
+  // in the new server's buffer, so start it at the tail. Deliberately not done
+  // in reconnectConsole(), which also runs on every transport drop — a dropped
+  // connection must not yank an admin who is reading back.
+  consoleStick = true;
   // A load still running for the old server would otherwise make loadPlayers()
   // skip the new one as "already loading", leaving the page stuck on Loading…
   loadingPlayers = false;
@@ -222,6 +227,9 @@ function navigate(page) {
 }
 
 function runPageEnterHooks(page) {
+  // The console has been filling up while it was hidden, and nothing could
+  // scroll it there — pin it now that it has a height to scroll.
+  if (page === 'console' && consoleStick) consoleScrollToBottom();
   if (page === 'overview') overviewStartPolling();
   if (page === 'players')  fetchServerRunning().then(() => loadPlayers());
   if (page === 'say')      fetchServerRunning();
@@ -255,6 +263,33 @@ function setConnState(state, label) {
 
 let consoleEs = null;
 
+// Follow the tail unless the admin has scrolled up to read back. This is a
+// sticky flag rather than a measurement taken at render time, because the page
+// is display:none until it is navigated to: everything measures 0 while hidden,
+// so a render-time test reads "at bottom", the scroll assignment does nothing,
+// and the admin arrives at the *top* of the buffer with the test now stuck at
+// false. The flag survives that because only a real scroll event clears it, and
+// no scroll events fire on a hidden element.
+let consoleStick = true;
+const CONSOLE_STICK_SLACK = 60;   // px of tolerance for "still at the bottom"
+
+function consoleAtBottom() {
+  return consoleOut.scrollHeight - consoleOut.clientHeight
+         <= consoleOut.scrollTop + CONSOLE_STICK_SLACK;
+}
+
+function consoleScrollToBottom() {
+  consoleOut.scrollTop = consoleOut.scrollHeight;
+}
+
+// Our own scrolling fires this too, which is harmless: it re-measures as
+// at-bottom and leaves the flag set.
+consoleOut.addEventListener('scroll', () => { consoleStick = consoleAtBottom(); });
+
+// Wrapping changes with the width — on a phone, the URL bar sliding away is
+// enough — and that moves the bottom out from under a pinned view.
+window.addEventListener('resize', () => { if (consoleStick) consoleScrollToBottom(); });
+
 function reconnectConsole() {
   if (consoleEs) { consoleEs.close(); consoleEs = null; }
   setConnState('', 'Connecting…');
@@ -272,9 +307,8 @@ function reconnectConsole() {
       return;
     }
     if (typeof data.content === 'string') {
-      const atBottom = consoleOut.scrollHeight - consoleOut.clientHeight <= consoleOut.scrollTop + 60;
       consoleOut.textContent = data.content;
-      if (atBottom) consoleOut.scrollTop = consoleOut.scrollHeight;
+      if (consoleStick) consoleScrollToBottom();
     }
   };
 
