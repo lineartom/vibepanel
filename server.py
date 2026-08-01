@@ -900,7 +900,12 @@ def api_server_start():
 
     if not jar:
         return jsonify({"ok": False, "error": "No jar selected"}), 400
-    if not re.match(r'^\d+[MG]$', mem):
+    # fullmatch, not match: Python's `$` also matches just before a trailing
+    # newline, so `^\d+[MG]$` accepts "1024M\n". The .strip() above removes it
+    # today, but a newline reaching send-keys would be typed as Enter — ending
+    # the java line and running whatever came after it. Don't leave that hanging
+    # on a .strip() staying put.
+    if not re.fullmatch(r'\d+[MG]', mem):
         return jsonify({"ok": False, "error": "Invalid memory value — use e.g. 1024M or 2G"}), 400
 
     try:
@@ -982,7 +987,13 @@ def api_download_fabric():
     if version == "None":
         version = None
 
-    if version and not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.\-]*$', version):
+    # fullmatch for the same reason as the memory value: `$` would otherwise let a
+    # trailing newline through. The version is passed to get-me-fabric.sh as argv
+    # (never through a shell), but the script interpolates it into a URL, so keep
+    # it to characters that can appear in a version number.
+    if version and not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9.\-]*', version):
+        return jsonify({"ok": False, "error": "Invalid version string"}), 400
+    if version and len(version) > 40:
         return jsonify({"ok": False, "error": "Invalid version string"}), 400
 
     try:

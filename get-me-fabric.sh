@@ -45,4 +45,8 @@ fi
 URL="https://meta.fabricmc.net/v2/versions/loader/${LATEST_MINECRAFT}/${LATEST_LOADER}/${LATEST_INSTALLER}/server/jar"
 
 echo "DOWNLOAD FROM ${URL}"
-wget --content-disposition ${URL}
+# Quoted: $2 lands in ${URL}, and unquoted it would word-split, so a version
+# containing whitespace would hand extra arguments to wget (`-O /some/path`
+# being the obvious one). VibePanel's own validation forbids spaces, but this
+# script is also run by hand.
+wget --content-disposition "${URL}"

@@ -152,9 +152,17 @@ So: **free text goes through `pane_text()`**, which removes control characters
 (they reach the foreground process through the pty and can signal it) and the
 shell metacharacters `` ` $ ( ) ; & | < > \ ' " ! ``. Two endpoints supply free
 text — `/api/say` (message) and `/api/players/ban` (reason). Everything else we
-send is either a constant (`list`, `stop`) or interpolates only values already
-validated by a strict regex: player names `^[A-Za-z0-9_]{1,16}$`, memory
-`^\d+[MG]$`, jar names `^[\w][\w\-\.]*\.jar$`.
+send is either a constant (`list`, `stop`), a value matched against a strict
+pattern (player names `[A-Za-z0-9_]{1,16}$`, memory `\d+[MG]`), or — better still
+— a value *selected from the filesystem* rather than validated: the jar to launch
+must be one of the entries `_list_jars()` just read out of the jars dir, so the
+request picks an entry and never contributes to the path.
+
+Use `re.fullmatch`, not `re.match`, for these patterns. Python's `$` also matches
+just before a trailing newline, so `re.match(r'^\d+[MG]$', "1024M\n")` succeeds —
+and a newline reaching `send-keys` is typed as Enter, ending our command line and
+running whatever follows it. Today `.strip()` removes it first; `fullmatch` means
+the safety doesn't depend on that staying put.
 
 That set is wider than the strict minimum — with the separators gone, a lone `(`
 only yields a bash syntax error — but the safety of the narrower list depends on
