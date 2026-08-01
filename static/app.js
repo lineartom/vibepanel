@@ -421,8 +421,11 @@ function renderRoster() {
           <div class="player-item-info">
             <div class="player-name">${esc(s.name)}</div>
             <div class="player-uuid">${esc(s.uuid)}</div>
+            <!-- "attempts", not "logins": most of these people were turned away
+                 by the whitelist, which is the whole point of the list. -->
             <div class="player-seen">
-              Last seen ${esc(s.last_seen)} &bull; ${s.seen} login${s.seen !== 1 ? 's' : ''}
+              Last seen ${esc(s.last_seen)} &bull;
+              ${s.seen} connection attempt${s.seen !== 1 ? 's' : ''}
             </div>
           </div>
           <div class="player-actions">
