@@ -99,10 +99,18 @@
         <p class="hint">Loading&hellip;</p>
       </div>
 
-      <!-- Port (from server.properties) -->
+      <!-- Port (from server.properties) and our public IP (looked up at startup) -->
       <div id="srv-port-card" class="card mem-card" hidden>
-        <div class="field-label">Port</div>
-        <div id="srv-port-value" class="mem-input srv-port-value"></div>
+        <div class="srv-net-row">
+          <div id="srv-port-field" class="srv-net-field" hidden>
+            <div class="field-label">Port</div>
+            <div id="srv-port-value" class="mem-input srv-port-value"></div>
+          </div>
+          <div id="srv-ip-field" class="srv-net-field" hidden>
+            <div class="field-label">Public IP</div>
+            <div id="srv-ip-value" class="mem-input srv-port-value"></div>
+          </div>
+        </div>
       </div>
 
       <!-- Start form — shown only when stopped -->

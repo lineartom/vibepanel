@@ -105,6 +105,25 @@ mtime, which is the date of its last line.
   .vibepanel.json      # panel state: last-used jar per session (written on start/stop)
 ```
 
+## External network access
+
+The panel reaches the internet in exactly **three** places, and the list is meant to
+stay short — default to reading our own files and talking to our own tmux server:
+
+1. `get-me-fabric.sh` downloading a server jar (the whole point of that feature).
+2. `_latest_minecraft_version()` asking the Fabric meta API which version is current.
+3. `_fetch_public_ip()` asking `api.ipify.org` for our public-facing address.
+
+The IP lookup runs **once, from `__main__` at startup** — never per request — and the
+result is cached in the `PUBLIC_IP` global and handed out by `/api/server/identity`.
+Keep it that way: the Server page hits that endpoint on every visit and refresh, so
+resolving lazily there would turn ordinary browsing into traffic against ipify. The
+response is parsed with `ipaddress.ip_address()`, so an error page or junk body yields
+`None` rather than something odd rendered into the UI. If the lookup fails the panel
+simply shows no IP until the next restart.
+
+Notably **not** on the list: any player-account lookup. See the roster section above.
+
 ## Dependencies
 
 ```bash

@@ -4,6 +4,7 @@ import re
 import time
 import json
 import argparse
+import ipaddress
 import shutil
 import subprocess
 import urllib.request
@@ -40,6 +41,27 @@ def _detect_version() -> str:
 
 
 VERSION = _detect_version()
+
+# Our public-facing address, so the Server page can show admins what players type.
+# Looked up exactly once, at startup — see _fetch_public_ip().
+PUBLIC_IP     = None
+PUBLIC_IP_URL = "https://api.ipify.org"
+
+
+def _fetch_public_ip() -> str | None:
+    """Ask ipify for our public IP.
+
+    One of only two places the panel reaches the internet (the other is the Fabric
+    download). Called once from __main__ so a busy page never turns into traffic
+    against someone else's API; if it fails, the panel just doesn't show an IP.
+    """
+    try:
+        with urllib.request.urlopen(PUBLIC_IP_URL, timeout=5) as resp:
+            raw = resp.read(64).decode("utf-8", "replace").strip()
+        return str(ipaddress.ip_address(raw))   # rejects anything that isn't an IP
+    except Exception as e:
+        print(f"Could not determine public IP from {PUBLIC_IP_URL}: {e}")
+        return None
 
 _ANSI   = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _MC_FMT = re.compile(r'§[0-9a-fklmnorABCDEFKLMNOR]')
@@ -967,7 +989,9 @@ def api_server_identity():
         except Exception:
             pass
 
-    return jsonify({"ok": True, "has_icon": has_icon, "motd": motd, "port": port})
+    # public_ip is host-wide, so every session's Server page gets the same value.
+    return jsonify({"ok": True, "has_icon": has_icon, "motd": motd,
+                    "port": port, "public_ip": PUBLIC_IP})
 
 
 @app.route("/api/server/icon")
@@ -1438,6 +1462,10 @@ if __name__ == "__main__":
     else:
         SESSIONS = list(raw_sessions)
     TMUX_TARGET = SESSIONS[0]
+
+    PUBLIC_IP = _fetch_public_ip()
+    if PUBLIC_IP:
+        print(f"Public IP: {PUBLIC_IP}")
 
     session_display = ', '.join(SESSIONS)
     print(f"VibePanel starting on http://{args.host}:{args.port}  "

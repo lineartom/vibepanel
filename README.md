@@ -11,7 +11,7 @@ A lightweight web frontend for a Minecraft server running in a tmux session. Man
 - **Say** — broadcasts a message to the server as `[Server]`
 - **Mods** — toggle Fabric mods on/off (moves files between `mods/` and `mods-saves/`); detects byte-for-byte conflicts
 - **Worlds** — save, load, and delete world backups as `.tgz` archives; autosaves before loading
-- **Server** — start/stop the server, download Fabric jars, view MOTD and server icon
+- **Server** — start/stop the server, download Fabric jars, view MOTD, server icon, port, and the host's public IP
 
 ## Requirements
 
@@ -65,6 +65,8 @@ Server-running detection uses `ps -t <pane_tty>` rather than checking the foregr
 Player edits take one of two routes depending on whether the server is up. While it's running they go out as console commands (`op`, `whitelist add`, `ban`, …) because the server owns those json files in memory and would overwrite anything written behind its back. While it's stopped VibePanel edits `whitelist.json`, `ops.json`, and `banned-players.json` directly. The UI says which mode it's in.
 
 Nothing about player management reaches the network: UUIDs come from the json files, from `logs/latest.log`, or from whatever the admin pastes into the UUID field. There is no account lookup service involved.
+
+The panel only ever calls out for three things: downloading a Fabric jar, checking the latest Minecraft version, and looking up the host's public IP via `api.ipify.org`. That last one happens once at startup, not per page view; if it fails, the Server page simply shows no IP.
 
 ## License
 

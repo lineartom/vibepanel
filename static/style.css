@@ -487,6 +487,18 @@ a { text-decoration: none; color: inherit; }
   color: var(--text2);
 }
 
+/* Port and public IP sit side by side, stacking on narrow screens. */
+.srv-net-row {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+.srv-net-field {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+}
+
 #srv-start-section {
   display: flex;
   flex-direction: column;
