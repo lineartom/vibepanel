@@ -857,6 +857,23 @@ def api_server_status():
         return jsonify({"running": False, "ok": False, "error": str(e)})
 
 
+def _list_jars(gdir: str) -> list:
+    """The .jar files we are willing to launch, read straight off disk.
+
+    Single source of truth for both the list the UI offers and the set
+    /api/server/start will accept, so the two can never disagree.
+    """
+    jars_path = os.path.join(gdir, JARS_DIR)
+    try:
+        entries = os.listdir(jars_path)
+    except OSError:
+        return []
+    # isfile, not just the suffix: a *directory* named foo.jar would otherwise be
+    # offered in the UI and accepted by start, and java would fail on it.
+    return sorted(f for f in entries
+                  if f.endswith(".jar") and os.path.isfile(os.path.join(jars_path, f)))
+
+
 @app.route("/api/server/jars")
 def api_server_jars():
     """List .jar files available in the configured jars directory."""
@@ -866,10 +883,8 @@ def api_server_jars():
     except subprocess.CalledProcessError:
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
     try:
-        jars_path = os.path.join(gdir, JARS_DIR)
-        os.makedirs(jars_path, exist_ok=True)
-        jars = sorted(f for f in os.listdir(jars_path) if f.endswith(".jar"))
-        return jsonify({"ok": True, "jars": jars, "jars_dir": JARS_DIR,
+        os.makedirs(os.path.join(gdir, JARS_DIR), exist_ok=True)
+        return jsonify({"ok": True, "jars": _list_jars(gdir), "jars_dir": JARS_DIR,
                         "last_jar": _last_jar(gdir, target.split(":")[0])})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -883,8 +898,8 @@ def api_server_start():
     jar    = str(data.get("jar", "")).strip()
     mem    = str(data.get("mem", "1024M")).strip().upper()
 
-    if not re.match(r'^[\w][\w\-\.]*\.jar$', jar):
-        return jsonify({"ok": False, "error": "Invalid jar name"}), 400
+    if not jar:
+        return jsonify({"ok": False, "error": "No jar selected"}), 400
     if not re.match(r'^\d+[MG]$', mem):
         return jsonify({"ok": False, "error": "Invalid memory value — use e.g. 1024M or 2G"}), 400
 
@@ -893,9 +908,17 @@ def api_server_start():
     except subprocess.CalledProcessError:
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
-    jar_path = os.path.join(gdir, JARS_DIR, jar)
-    if not os.path.isfile(jar_path):
-        return jsonify({"ok": False, "error": f"Jar not found: {jar}"}), 404
+    # The request *selects* a jar; it never contributes to the path we build.
+    # Enumerate what is actually in the jars dir and require an exact match, then
+    # use the entry we listed. No pattern-matching on the client's string can be
+    # as trustworthy as "this is one of the files we just read off disk", and it
+    # is the same list the UI offered, so anything else is a stale or forged pick.
+    available = _list_jars(gdir)
+    selected  = next((f for f in available if f == jar), None)
+    if selected is None:
+        return jsonify({"ok": False,
+                        "error": f"No such jar in {JARS_DIR}: {jar}"}), 404
+    jar_path = os.path.join(gdir, JARS_DIR, selected)
 
     if _is_running(target):
         return jsonify({"ok": False, "error": "Server is already running"}), 409
@@ -920,7 +943,7 @@ def api_server_start():
             )
         # Also remember on start, so stops that happen outside the panel
         # (console 'stop', crash) still leave a sensible default behind.
-        _remember_last_jar(gdir, session, jar)
+        _remember_last_jar(gdir, session, selected)
         return jsonify({"ok": True})
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": str(e)}), 503
