@@ -40,6 +40,24 @@ function api(path) {
   return path + sep + 's=' + encodeURIComponent(currentSession);
 }
 
+// Bumped on every session switch. A request carries the epoch it was issued
+// under; if the admin has moved to another server by the time the reply lands,
+// the reply belongs to a page that is no longer on screen and must be dropped.
+let sessionEpoch = 0;
+
+const STALE = Symbol('stale-session');
+
+// Session-scoped fetch. Returns parsed JSON, or STALE if we switched servers
+// while the request was in flight. Callers must bail on STALE — rendering it
+// would put one server's data under another server's tab. Network failures
+// still throw, so existing catch blocks keep working.
+async function sessionJson(path, opts) {
+  const epoch = sessionEpoch;
+  const res   = await fetch(api(path), opts);
+  const data  = await res.json();
+  return epoch === sessionEpoch ? data : STALE;
+}
+
 async function loadSessions() {
   try {
     const res  = await fetch('/api/sessions');
@@ -89,11 +107,14 @@ function clickSessionTab(tab) {
   activeTab = tab;
 
   if (switching) {
+    sessionEpoch++;              // discard replies still in flight for the old server
     currentSession = tab;
     serverRunning  = null;
+    serverError    = null;
     jarsLoaded     = false;
     selectedJar    = null;
     srvPort        = null;
+    resetSessionUi();
     reconnectConsole();
   }
 
@@ -107,6 +128,67 @@ function clickSessionTab(tab) {
     if (targetPage === 'server') srvStopPolling();
     runPageEnterHooks(targetPage);
   }
+}
+
+// Wipe every element that holds a *result* for the server we're leaving.
+// The pages share one DOM across sessions, so anything left behind reads as
+// though it belongs to the server being switched to — at best a stale message,
+// at worst a live action button (the mods conflict notice) now aimed at the
+// wrong server's files.
+function resetSessionUi() {
+  // Feedback lines. The second value is the element's base class, if it has one.
+  [['start-feedback',     ''],
+   ['say-feedback',       ''],
+   ['mods-op-feedback',   ''],
+   ['worlds-op-feedback', 'worlds-op-feedback'],
+   ['world-save-feedback', ''],
+   ['players-op-feedback', ''],
+   ['add-player-feedback', '']].forEach(([id, base]) => {
+    const el = $(id);
+    if (!el) return;
+    el.innerHTML = '';
+    el.className = base;
+  });
+
+  $('dl-output').textContent = '';
+  $('dl-output-wrap').hidden = true;
+
+  // Drafts aimed at one particular server.
+  $('say-input').value        = '';
+  $('char-count').textContent = `0 / ${MAX_LEN}`;
+  $('char-count').style.color = '';
+  $('world-name').value       = '';
+  $('add-player-name').value  = '';
+  $('add-player-uuid').value  = '';
+  $('add-player-op').checked  = false;
+
+  // Data that is about to be re-fetched: show a placeholder rather than the
+  // previous server's numbers while that request is in flight.
+  const loading = '<p class="hint">Loading&hellip;</p>';
+  $('console-out').textContent      = '';
+  $('srv-identity').hidden          = true;
+  $('srv-port-card').hidden         = true;
+  $('srv-status-card').innerHTML    = loading;
+  $('jar-list-wrap').innerHTML      = loading;
+  $('mods-active-list').innerHTML   = loading;
+  $('mods-inactive-list').innerHTML = loading;
+  $('worlds-list-wrap').innerHTML   = loading;
+  $('players-online').innerHTML     = loading;
+  $('roster-list').innerHTML        = loading;
+  $('suggest-list').innerHTML       = loading;
+  ['mods-active-count', 'mods-inactive-count',
+   'roster-count', 'suggest-count'].forEach(id => { $(id).textContent = ''; });
+  $('mods-disk-info').hidden   = true;
+  $('worlds-disk-info').hidden = true;
+  $('whitelist-state').hidden  = true;
+
+  onlineData = null;
+  rosterData = null;
+  // A load still running for the old server would otherwise make loadPlayers()
+  // skip the new one as "already loading", leaving the page stuck on Loading…
+  loadingPlayers = false;
+
+  renderHistory();   // draws the session we just switched to
 }
 
 // ── Navigation ───────────────────────────────────────────
@@ -244,8 +326,9 @@ async function loadOnline() {
   if (serverRunning === false) { onlineData = null; renderOnline(); return; }
   $('players-online').innerHTML = '<p class="hint">Querying server…</p>';
   try {
-    const res = await fetch(api('/api/players'));
-    onlineData = await res.json();
+    const data = await sessionJson('/api/players');
+    if (data === STALE) return;          // switched servers mid-request
+    onlineData = data;
   } catch (err) {
     onlineData = { ok: false, error: `Network error: ${err.message}` };
   }
@@ -322,8 +405,9 @@ function playerBadges(p) {
 
 async function loadRoster() {
   try {
-    const res = await fetch(api('/api/players/roster'));
-    rosterData = await res.json();
+    const data = await sessionJson('/api/players/roster');
+    if (data === STALE) return;
+    rosterData = data;
   } catch (err) {
     rosterData = { ok: false, error: `Network error: ${err.message}` };
   }
@@ -474,12 +558,12 @@ async function playerMutate(endpoint, body, label) {
   document.querySelectorAll('.btn-player-act').forEach(b => { b.disabled = true; });
 
   try {
-    const res  = await fetch(api(endpoint), {
+    const data = await sessionJson(endpoint, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(body),
     });
-    const data = await res.json();
+    if (data === STALE) return;          // action ran on the right server; UI moved on
 
     if (data.ok) {
       fb.textContent = `✓ ${data.message || 'Done'}`;
@@ -535,12 +619,12 @@ async function addPlayer() {
   fb.className    = '';
 
   try {
-    const res  = await fetch(api('/api/players/add'), {
+    const data = await sessionJson('/api/players/add', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ name, uuid, op: $('add-player-op').checked }),
     });
-    const data = await res.json();
+    if (data === STALE) return;
 
     if (data.ok) {
       fb.textContent = `✓ ${data.message || 'Added'}`;
@@ -557,9 +641,12 @@ async function addPlayer() {
   } catch (err) {
     fb.textContent = `Network error: ${err.message}`;
     fb.className   = 'fb-error';
+  } finally {
+    // finally, not a trailing statement: a STALE bail must still un-stick the
+    // button, since it now belongs to the server we switched to.
+    btn.disabled    = false;
+    btn.textContent = '+ Add';
   }
-  btn.disabled    = false;
-  btn.textContent = '+ Add';
 }
 
 btnRefresh.addEventListener('click', loadPlayers);
@@ -574,9 +661,15 @@ const sayInput    = $('say-input');
 const btnSay      = $('btn-say');
 const charCount   = $('char-count');
 const sayFeedback = $('say-feedback');
-const sayHistory  = $('say-history');
+const sayHistoryEl = $('say-history');
 const MAX_LEN     = 256;
-let history       = [];
+// Per session — a broadcast went to one server, so it must not appear under
+// another server's tab. Kept (not cleared) so switching back shows it again.
+const sayHistory  = {};
+
+function currentHistory() {
+  return (sayHistory[currentSession] ||= []);
+}
 
 sayInput.addEventListener('input', () => {
   const n = sayInput.value.length;
@@ -601,12 +694,12 @@ async function sendSay() {
   sayFeedback.className = '';
 
   try {
-    const res  = await fetch(api('/api/say'), {
+    const data = await sessionJson('/api/say', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ message: msg }),
     });
-    const data = await res.json();
+    if (data === STALE) return;
 
     if (data.ok) {
       sayFeedback.textContent = '✓ Sent';
@@ -631,20 +724,22 @@ async function sendSay() {
 
 function addHistory(msg) {
   const t = new Date().toLocaleTimeString();
-  history.unshift({ msg, t });
-  if (history.length > 30) history.pop();
+  const h = currentHistory();
+  h.unshift({ msg, t });
+  if (h.length > 30) h.pop();
   renderHistory();
 }
 
 function renderHistory() {
-  if (history.length === 0) {
-    sayHistory.innerHTML = '<p class="hint">No messages sent yet.</p>';
+  const h = currentHistory();
+  if (h.length === 0) {
+    sayHistoryEl.innerHTML = '<p class="hint">No messages sent yet.</p>';
     return;
   }
-  sayHistory.innerHTML = history.map(h => `
+  sayHistoryEl.innerHTML = h.map(entry => `
     <div class="history-row">
-      <div class="history-time">${esc(h.t)}</div>
-      <div class="history-msg">${esc(h.msg)}</div>
+      <div class="history-time">${esc(entry.t)}</div>
+      <div class="history-msg">${esc(entry.msg)}</div>
     </div>`).join('');
 }
 
@@ -655,8 +750,8 @@ let serverError   = null;   // set when the tmux pane itself can't be reached
 
 async function fetchServerRunning() {
   try {
-    const res  = await fetch(api('/api/server/status'));
-    const data = await res.json();
+    const data = await sessionJson('/api/server/status');
+    if (data === STALE) return STALE;
     const changed = serverRunning !== data.running;
     serverRunning = data.running;
     serverError   = data.ok === false
@@ -896,8 +991,8 @@ function srvStartPolling() {
 
 async function loadLatestMinecraft() {
   try {
-    const res  = await fetch(api('/api/server/latest-minecraft'));
-    const data = await res.json();
+    const data = await sessionJson('/api/server/latest-minecraft');
+    if (data === STALE) return;
     if (data.ok && data.version) {
       $('fabric-version').placeholder = `e.g. ${data.version}`;
     }
@@ -910,8 +1005,8 @@ async function loadServerIdentity() {
   const motdEl = $('srv-motd');
 
   try {
-    const res  = await fetch(api('/api/server/identity'));
-    const data = await res.json();
+    const data = await sessionJson('/api/server/identity');
+    if (data === STALE) return;
     if (!data.ok) { wrap.hidden = true; $('srv-port-card').hidden = true; return; }
 
     // Port comes from this session's server.properties; the public IP is host-wide
@@ -966,6 +1061,7 @@ async function loadServerStatus() {
   const wasRunning = serverRunning;
   const data = await fetchServerRunning();
 
+  if (data === STALE) return;   // reply was for the server we just left
   if (!data) {
     card.innerHTML = `<p class="hint">Could not reach server.</p>`;
     return;
@@ -1019,8 +1115,8 @@ async function loadJars() {
   if (jarsLoaded) return;
   const wrap = $('jar-list-wrap');
   try {
-    const res  = await fetch(api('/api/server/jars'));
-    const data = await res.json();
+    const data = await sessionJson('/api/server/jars');
+    if (data === STALE) return;
 
     if (!data.ok) {
       wrap.innerHTML = `<p class="hint">Error: ${esc(data.error)}</p>`;
@@ -1093,12 +1189,12 @@ $('btn-download').addEventListener('click', async () => {
   outputWrap.hidden = true;
 
   try {
-    const res  = await fetch(api('/api/server/download-fabric'), {
+    const data = await sessionJson('/api/server/download-fabric', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ version: version || null }),
     });
-    const data = await res.json();
+    if (data === STALE) { btn.disabled = false; btn.textContent = '↓ Download'; return; }
 
     const text = data.output || data.error || (data.ok ? 'Done.' : 'Unknown error.');
     output.textContent = text;
@@ -1138,12 +1234,12 @@ $('btn-start').addEventListener('click', async () => {
   feedback.className = '';
 
   try {
-    const res  = await fetch(api('/api/server/start'), {
+    const data = await sessionJson('/api/server/start', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ jar: selectedJar, mem }),
     });
-    const data = await res.json();
+    if (data === STALE) { btn.textContent = '▶ Start Server'; return; }
 
     if (data.ok) {
       feedback.textContent = '✓ Start command sent — server will appear as Running shortly.';
@@ -1171,8 +1267,8 @@ async function loadMods() {
   $('mods-inactive-count').textContent = '';
 
   try {
-    const res  = await fetch(api('/api/mods/list'));
-    const data = await res.json();
+    const data = await sessionJson('/api/mods/list');
+    if (data === STALE) return;
     renderModsList(data);
   } catch (err) {
     const msg = `<p class="hint">Error: ${esc(err.message)}</p>`;
@@ -1238,12 +1334,12 @@ async function moveMod(filename, action) {
   document.querySelectorAll('.btn-mod-move').forEach(b => { b.disabled = true; });
 
   try {
-    const res  = await fetch(endpoint, {
+    const data = await sessionJson(endpoint, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ filename }),
     });
-    const data = await res.json();
+    if (data === STALE) return;
 
     if (data.ok) {
       loadMods();
@@ -1279,12 +1375,12 @@ async function deleteBothConflict(filename) {
   const opFb = $('mods-op-feedback');
 
   try {
-    const res  = await fetch(api('/api/mods/delete'), {
+    const data = await sessionJson('/api/mods/delete', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ filename, location: 'both' }),
     });
-    const data = await res.json();
+    if (data === STALE) return;
 
     if (data.ok) {
       opFb.textContent = '';
@@ -1308,8 +1404,8 @@ async function loadWorlds() {
   const wrap = $('worlds-list-wrap');
   wrap.innerHTML = '<p class="hint">Loading&hellip;</p>';
   try {
-    const res  = await fetch(api('/api/worlds/list'));
-    const data = await res.json();
+    const data = await sessionJson('/api/worlds/list');
+    if (data === STALE) return;
     renderWorldsList(data);
   } catch (err) {
     wrap.innerHTML = `<p class="hint">Error: ${esc(err.message)}</p>`;
@@ -1386,12 +1482,12 @@ async function saveWorld() {
   opFb.className   = '';
 
   try {
-    const res  = await fetch(api('/api/worlds/save'), {
+    const data = await sessionJson('/api/worlds/save', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ name: nameInput.value.trim() }),
     });
-    const data = await res.json();
+    if (data === STALE) return;
 
     if (data.ok) {
       fb.textContent = `✓ Saved as ${data.filename} (${fmtBytes(data.size)})`;
@@ -1422,12 +1518,12 @@ async function loadWorld(filename) {
   document.querySelectorAll('.btn-world-load, .btn-world-delete').forEach(b => { b.disabled = true; });
 
   try {
-    const res  = await fetch(api('/api/worlds/load'), {
+    const data = await sessionJson('/api/worlds/load', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ filename }),
     });
-    const data = await res.json();
+    if (data === STALE) return;
 
     if (data.ok) {
       const note = data.autosaved ? ` (autosaved as ${data.autosaved})` : '';
@@ -1452,12 +1548,12 @@ async function deleteWorld(filename) {
   opFb.className   = '';
 
   try {
-    const res  = await fetch(api('/api/worlds/delete'), {
+    const data = await sessionJson('/api/worlds/delete', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ filename }),
     });
-    const data = await res.json();
+    if (data === STALE) return;
 
     if (!data.ok) {
       opFb.textContent = `Error: ${data.error}`;
@@ -1478,11 +1574,11 @@ async function deleteAutosaves() {
   opFb.className   = '';
 
   try {
-    const res  = await fetch(api('/api/worlds/delete-autosaves'), {
+    const data = await sessionJson('/api/worlds/delete-autosaves', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
     });
-    const data = await res.json();
+    if (data === STALE) return;
 
     if (data.ok) {
       opFb.textContent = `✓ Deleted ${data.deleted} autosave${data.deleted !== 1 ? 's' : ''}.`;

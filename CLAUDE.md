@@ -105,6 +105,35 @@ mtime, which is the date of its last line.
   .vibepanel.json      # panel state: last-used jar per session (written on start/stop)
 ```
 
+## Multiple sessions share one DOM — two rules
+
+Every page exists once in `index.html` and is reused by all sessions; switching
+servers only changes `currentSession` and re-fetches. That makes cross-session
+bleed the easiest bug to write in this codebase, so:
+
+**1. Session-scoped requests go through `sessionJson()`, and callers bail on `STALE`.**
+`api()` stamps the session at *request* time, but rendering happens whenever the
+reply lands — and `/api/players` sleeps ~0.8 s server-side, so switching servers
+mid-request is routine, not a rare race. `sessionJson()` records `sessionEpoch`
+when it fires and returns the `STALE` sentinel if the epoch moved by the time the
+reply arrives; the caller must `return` without touching the DOM. Note the action
+itself already went to the right server — only the UI feedback is discarded.
+Overview fetches build their own `?s=` URLs and write into `overviewCache[session]`,
+so they deliberately do *not* use this and must keep rendering after a switch.
+
+**2. Anything that renders a per-session result gets cleared in `resetSessionUi()`.**
+Feedback lines, output blocks, drafts, and list contents all persist across a switch
+otherwise. This is not only cosmetic: the mods conflict notice carries a live
+"Delete Both" button, and left on screen it would delete the *new* server's files
+for a conflict raised on the old one. When adding UI that holds a result, add it
+to `resetSessionUi()` in the same commit. Same goes for in-flight guard flags —
+`loadingPlayers` is reset there, otherwise a load still running for the old server
+makes the new one skip as "already loading" and the page sticks on Loading….
+
+Per-session data that should survive a switch (rather than be cleared) is keyed by
+session name — see `sayHistory`, so a broadcast sent to one server reappears under
+that server's tab and never under another's.
+
 ## External network access
 
 The panel reaches the internet in exactly **three** places, and the list is meant to
