@@ -702,9 +702,12 @@ async function sendSay() {
     if (data === STALE) return;
 
     if (data.ok) {
-      sayFeedback.textContent = '✓ Sent';
+      // The server may have removed characters a shell could act on; show what
+      // was actually broadcast rather than what was typed.
+      const sent = data.sent ?? msg;
+      sayFeedback.textContent = sent === msg ? '✓ Sent' : '✓ Sent (some characters removed)';
       sayFeedback.className = 'fb-ok';
-      addHistory(msg);
+      addHistory(sent);
       sayInput.value = '';
       charCount.textContent = `0 / ${MAX_LEN}`;
       charCount.style.color = '';

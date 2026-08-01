@@ -75,7 +75,7 @@ reason: an unreachable tmux pane and an idle one both report `running: false`, a
 UI has to be able to tell them apart.
 
 Names are validated against `^[A-Za-z0-9_]{1,16}$` before ever reaching a console
-command; ban reasons are stripped of control characters like `/api/say` does.
+command; ban reasons go through `pane_text()` — see the section below.
 
 ### Log scraping for add-suggestions
 
@@ -133,6 +133,37 @@ makes the new one skip as "already loading" and the page sticks on Loading….
 Per-session data that should survive a switch (rather than be cleared) is keyed by
 session name — see `sayHistory`, so a broadcast sent to one server reappears under
 that server's tab and never under another's.
+
+## Anything typed into the pane must be inert as a shell command
+
+`tmux_send()` types text at whatever is reading the pane. That is *usually* the
+Minecraft console, but the server may have stopped a moment earlier — and we
+accept that race rather than trying to close it — so a shell may be reading
+instead. `say hi; rm -rf ~` typed at a shell runs `rm`. This is not theoretical;
+it was verified with canary files before being fixed.
+
+So: **free text goes through `pane_text()`**, which removes control characters
+(they reach the foreground process through the pty and can signal it) and the
+shell metacharacters `` ` $ ( ) ; & | < > \ ' " ! ``. Two endpoints supply free
+text — `/api/say` (message) and `/api/players/ban` (reason). Everything else we
+send is either a constant (`list`, `stop`) or interpolates only values already
+validated by a strict regex: player names `^[A-Za-z0-9_]{1,16}$`, memory
+`^\d+[MG]$`, jar names `^[\w][\w\-\.]*\.jar$`.
+
+That set is wider than the strict minimum — with the separators gone, a lone `(`
+only yields a bash syntax error — but the safety of the narrower list depends on
+our line always beginning with `say `/`ban `, which is a fragile thing to rely on.
+Prefer the blunt version.
+
+The cost is that apostrophes, `!` and brackets are dropped from chat, so
+`/api/say` returns the text it actually sent as `sent`, and the UI records *that*
+in its history and says "some characters removed" rather than silently
+misreporting what was broadcast.
+
+`/api/server/start` is the exception that is genuinely meant for a shell: it uses
+`shlex.quote()` on the jar path and `SERVER_DIR`, both of which come from the
+pane's CWD or config rather than from us. That also makes paths containing spaces
+work, which they previously did not.
 
 ## External network access
 

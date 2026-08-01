@@ -5,6 +5,7 @@ import time
 import json
 import argparse
 import ipaddress
+import shlex
 import shutil
 import subprocess
 import urllib.request
@@ -69,6 +70,36 @@ _MC_FMT = re.compile(r'§[0-9a-fklmnorABCDEFKLMNOR]')
 
 def clean(text: str) -> str:
     return _MC_FMT.sub('', _ANSI.sub('', text))
+
+
+# Characters a shell would act on. Text we type into the pane is normally read by
+# the Minecraft console, but nothing guarantees that: the server may have stopped
+# a moment earlier and left a shell on the other end. Everything we send must
+# therefore be inert *as a shell command line* — `say hi; rm -rf ~` would run rm.
+#   ` $       command substitution and expansion
+#   ( )       subshells
+#   ; & |     command separators
+#   < >       redirection (can truncate files)
+#   \         escaping
+#   ' "       quoting — an unbalanced quote swallows the lines we send afterwards
+#   !         history expansion in interactive shells (`!!` re-runs the last command)
+#
+# The list is deliberately wider than the minimum needed to stop execution: with
+# the separators gone a lone `(` only produces a bash syntax error, but keeping
+# the set small and obviously-safe beats relying on our own line always starting
+# with `say `/`ban `. The cost is that apostrophes, `!` and brackets don't survive
+# into chat, which is why /api/say reports back the text it actually sent.
+_SHELL_UNSAFE_RE = re.compile(r'''[`$();&|<>\\'"!\x00-\x1f\x7f-\x9f]''')
+
+
+def pane_text(raw, limit: int) -> str:
+    """Sanitise free text for typing into the pane, whatever is reading it.
+
+    Minecraft treats the remainder as ordinary chat; a shell can do nothing with
+    it. Callers that need to report what actually went out should use the return
+    value rather than the input.
+    """
+    return _SHELL_UNSAFE_RE.sub('', str(raw)).strip()[:limit]
 
 
 def tmux_send(command: str, target: str = None) -> None:
@@ -731,10 +762,9 @@ def api_players_ban():
         return err
     name = ctx["name"]
     ban  = bool(ctx["data"].get("ban", True))
-    # Control characters would reach the server's stdin through the pty and could
-    # signal the foreground process; strip them exactly like /api/say does.
-    reason = re.sub(r'[\x00-\x1f\x7f-\x9f]', '',
-                    str(ctx["data"].get("reason", "")).strip())[:120]
+    # Same treatment as /api/say: the reason is free text and goes out as part of
+    # a console line, so it must be inert to both the pty and a shell.
+    reason = pane_text(ctx["data"].get("reason", ""), 120)
 
     if ctx["running"]:
         cmd = (f"ban {name} {reason}".strip() if ban else f"pardon {name}")
@@ -772,19 +802,23 @@ def api_say():
     target = _session_target()
     try:
         data = request.get_json(force=True, silent=True) or {}
-        message = str(data.get("message", "")).strip()
-        if not message:
+        raw = str(data.get("message", "")).strip()
+        if not raw:
             return jsonify({"ok": False, "error": "Empty message"}), 400
-        if len(message) > 256:
+        if len(raw) > 256:
             return jsonify({"ok": False, "error": "Message too long (max 256 chars)"}), 400
-        # Strip all C0 and C1 control characters. Leaving any in (e.g. \x03 Ctrl+C,
-        # \x1a Ctrl+Z, \x04 EOF) would send signals to the tmux pane's foreground
-        # process via the pty line discipline, potentially killing the server.
-        message = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', message)
+        # Drops control characters (\x03 Ctrl+C, \x1a Ctrl+Z and friends would reach
+        # the pane's foreground process through the pty and could kill the server)
+        # and shell metacharacters, in case a shell is reading rather than Minecraft.
+        message = pane_text(raw, 256)
         if not message:
-            return jsonify({"ok": False, "error": "Message was empty after stripping control characters"}), 400
+            return jsonify({"ok": False,
+                            "error": "Nothing left to send after removing characters "
+                                     "a shell could act on"}), 400
         tmux_send(f"say {message}", target)
-        return jsonify({"ok": True})
+        # Report what actually went out, so the panel's history doesn't claim we
+        # broadcast something we altered.
+        return jsonify({"ok": True, "sent": message})
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": str(e)}), 503
     except Exception as e:
@@ -852,9 +886,13 @@ def api_server_start():
     if _is_running(target):
         return jsonify({"ok": False, "error": "Server is already running"}), 409
 
-    cmd = f"java -Xmx{mem} -Xms{mem} -jar {jar_path} nogui"
+    # Unlike the console commands, this line is *meant* for a shell. jar_path is
+    # built from the pane's CWD and JARS_DIR, and SERVER_DIR comes from config —
+    # none of which we control, so quote them. Also makes paths containing spaces
+    # work, which they previously did not.
+    cmd = f"java -Xmx{mem} -Xms{mem} -jar {shlex.quote(jar_path)} nogui"
     if SERVER_DIR:
-        cmd = f"cd {SERVER_DIR} && {cmd}"
+        cmd = f"cd {shlex.quote(SERVER_DIR)} && {cmd}"
 
     try:
         session = target.split(":")[0]
