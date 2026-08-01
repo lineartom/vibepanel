@@ -42,7 +42,7 @@ Open `http://<host>:8080` in a browser. The `--session` value should match the n
 | `--worlds-dir` | `WORLDS_DIR` | `world-saves` | where world `.tgz` backups are stored |
 | `--mods-dir` | `MODS_DIR` | `mods` | active Fabric mods directory |
 | `--mods-saves-dir` | `MODS_SAVES_DIR` | `mods-saves` | inactive mods directory |
-| `--server-dir` | `SERVER_DIR` | *(none)* | cd here before starting the server |
+| `--server-dir` | `SERVER_DIR` | *(none)* | cd here before starting the server (resolved to an absolute path at startup) |
 
 All paths are relative to the Minecraft server's working directory (auto-detected from the tmux pane).
 

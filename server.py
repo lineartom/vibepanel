@@ -14,10 +14,24 @@ from flask import Flask, render_template, request, jsonify, Response, stream_wit
 
 app = Flask(__name__)
 
+
+def _abs_dir(path: str) -> str:
+    """Absolute, ~-expanded form of a configured directory ('' stays '').
+
+    SERVER_DIR ends up in a `cd` that runs *inside the tmux pane*, whose working
+    directory is the game dir rather than the panel's, so a relative value would
+    resolve against a base the admin never meant. Pin it to the panel's CWD at
+    startup instead. Expanding ~ here is also required, not cosmetic: the `cd`
+    argument is shlex-quoted, which stops the shell from expanding it for us.
+    """
+    return os.path.abspath(os.path.expanduser(path)) if path else ""
+
+
 TMUX_TARGET    = os.environ.get("TMUX_TARGET", "minecraft")
 SESSIONS       = [TMUX_TARGET]   # replaced in __main__; kept as list for route helpers
 JARS_DIR       = os.environ.get("JARS_DIR", "server-jars")
-SERVER_DIR     = os.environ.get("SERVER_DIR", "")
+# The only path here that is absolute; the rest stay relative to the game dir.
+SERVER_DIR     = _abs_dir(os.environ.get("SERVER_DIR", ""))
 WORLDS_DIR     = os.environ.get("WORLDS_DIR", "world-saves")
 MODS_DIR       = os.environ.get("MODS_DIR", "mods")
 MODS_SAVES_DIR = os.environ.get("MODS_SAVES_DIR", "mods-saves")
@@ -1486,7 +1500,7 @@ if __name__ == "__main__":
     if args.jars_dir:
         JARS_DIR = args.jars_dir
     if args.server_dir:
-        SERVER_DIR = args.server_dir
+        SERVER_DIR = _abs_dir(args.server_dir)
     if args.worlds_dir:
         WORLDS_DIR = args.worlds_dir
     if args.mods_dir:
@@ -1504,6 +1518,12 @@ if __name__ == "__main__":
     PUBLIC_IP = _fetch_public_ip()
     if PUBLIC_IP:
         print(f"Public IP: {PUBLIC_IP}")
+
+    if SERVER_DIR:
+        # Say which directory we resolved to, and warn now rather than leaving a
+        # failed `cd` to surface as a mysteriously-not-starting server later.
+        print(f"Server dir: {SERVER_DIR}"
+              + ("" if os.path.isdir(SERVER_DIR) else "  (does not exist yet)"))
 
     session_display = ', '.join(SESSIONS)
     print(f"VibePanel starting on http://{args.host}:{args.port}  "

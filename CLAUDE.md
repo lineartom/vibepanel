@@ -10,13 +10,19 @@ python server.py --session survival --session creative  # multiple servers; show
 
 All config can also be set via environment variables (see below).
 
+`SERVER_DIR` is the one configured path that is made absolute at startup, because
+it lands in a `cd` that runs *inside the tmux pane* — where the working directory
+is the game dir, not the panel's — so a relative value would resolve against a
+base the admin never chose. The `*_DIR` settings stay relative: they are joined
+onto the game dir with `os.path.join`, which still accepts an absolute override.
+
 ## CLI flags / environment variables
 
 | Flag | Env var | Default | Purpose |
 |---|---|---|---|
 | `--session` | `TMUX_TARGET` | `minecraft` | tmux target; **repeat** for multiple servers: `--session mc1 --session mc2` |
 | `--jars-dir` | `JARS_DIR` | `server-jars` | dir (relative to game dir) where .jar files live |
-| `--server-dir` | `SERVER_DIR` | *(none)* | cd here before starting the server |
+| `--server-dir` | `SERVER_DIR` | *(none)* | cd here before starting the server; resolved to an absolute path (and `~` expanded) at startup |
 | `--worlds-dir` | `WORLDS_DIR` | `world-saves` | dir for world .tgz backups |
 | `--mods-dir` | `MODS_DIR` | `mods` | active mods directory |
 | `--mods-saves-dir` | `MODS_SAVES_DIR` | `mods-saves` | inactive (stashed) mods directory |
