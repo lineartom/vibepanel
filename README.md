@@ -11,7 +11,7 @@ A lightweight web frontend for a Minecraft server running in a tmux session. Man
 - **Say** — broadcasts a message to the server as `[Server]`
 - **Mods** — toggle Fabric mods on/off (moves files between `mods/` and `mods-saves/`); detects byte-for-byte conflicts
 - **Worlds** — save, load, and delete world backups as `.tgz` archives; autosaves before loading
-- **Server** — start/stop the server, download Fabric jars, view MOTD, server icon, port, and the host's public IP
+- **Server** — start/stop the server, download Fabric jars, view MOTD, server icon, port, Geyser's Bedrock port if it's installed, and the host's public IP
 
 ## Requirements
 

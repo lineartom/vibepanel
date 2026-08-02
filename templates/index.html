@@ -99,12 +99,17 @@
         <p class="hint">Loading&hellip;</p>
       </div>
 
-      <!-- Port (from server.properties) and our public IP (looked up at startup) -->
+      <!-- Port (from server.properties), Geyser's Bedrock port if it is installed,
+           and our public IP (looked up at startup) -->
       <div id="srv-port-card" class="card mem-card" hidden>
         <div class="srv-net-row">
           <div id="srv-port-field" class="srv-net-field" hidden>
             <div class="field-label">Port</div>
             <div id="srv-port-value" class="mem-input srv-port-value"></div>
+          </div>
+          <div id="srv-bedrock-field" class="srv-net-field" hidden>
+            <div class="field-label">Bedrock Port</div>
+            <div id="srv-bedrock-value" class="mem-input srv-port-value"></div>
           </div>
           <div id="srv-ip-field" class="srv-net-field" hidden>
             <div class="field-label">Public IP</div>

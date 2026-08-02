@@ -1046,18 +1046,23 @@ async function loadServerIdentity() {
     if (data === STALE) return;
     if (!data.ok) { wrap.hidden = true; $('srv-port-card').hidden = true; return; }
 
-    // Port comes from this session's server.properties; the public IP is host-wide
-    // and looked up once when the panel started, so it may be absent.
+    // Port comes from this session's server.properties and the Bedrock port from
+    // its Geyser config, which most servers won't have; the public IP is host-wide
+    // and looked up once when the panel started, so it may be absent too.
     srvPort = data.port ?? null;
-    const publicIp = data.public_ip || null;
+    const bedrockPort = data.bedrock_port ?? null;
+    const publicIp    = data.public_ip || null;
 
     $('srv-port-field').hidden = !srvPort;
     if (srvPort) $('srv-port-value').textContent = srvPort;
 
+    $('srv-bedrock-field').hidden = !bedrockPort;
+    if (bedrockPort) $('srv-bedrock-value').textContent = bedrockPort;
+
     $('srv-ip-field').hidden = !publicIp;
     if (publicIp) $('srv-ip-value').textContent = publicIp;
 
-    $('srv-port-card').hidden = !srvPort && !publicIp;
+    $('srv-port-card').hidden = !srvPort && !bedrockPort && !publicIp;
 
     const motdLines = data.motd
       ? data.motd.split('\n').filter(l => l.length > 0)

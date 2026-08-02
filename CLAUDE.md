@@ -95,6 +95,19 @@ the clock runs forward (a restart rotates the file away), so each backwards jump
 midnight rollover. Count them, then date each hit by counting back from the file's
 mtime, which is the date of its last line.
 
+## Geyser's Bedrock port
+
+`/api/server/identity` reports `bedrock_port` from `config/Geyser-Fabric/config.yml`
+when that file exists, and the Server page shows it beside the Java port. Most
+servers have no Geyser, so a missing file is the normal case, not an error — the
+field is simply absent.
+
+`_read_bedrock_port()` scans for the key instead of parsing YAML: Flask is the only
+runtime dependency and one integer does not justify a second. The scan is scoped to
+the top-level `bedrock:` block, because the same file's `remote:` block also has a
+`port:` — the Java server Geyser forwards to — which is emphatically not the port a
+Bedrock player types in.
+
 ## Directory layout (relative to game dir)
 
 ```
@@ -104,6 +117,7 @@ mtime, which is the date of its last line.
   mods-saves/          # inactive/stashed mods                (MODS_SAVES_DIR)
   world-saves/         # .tgz world backups                   (WORLDS_DIR)
   logs/latest.log      # scraped for player name→UUID suggestions (read-only)
+  config/Geyser-Fabric/config.yml   # bedrock.port, if Geyser is installed (read-only)
   whitelist.json       # read + written by the Players page
   ops.json             #   "
   banned-players.json  #   "

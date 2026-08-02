@@ -396,6 +396,10 @@ BANNED_FILE    = "banned-players.json"
 LOGS_DIR       = "logs"
 LATEST_LOG     = "latest.log"
 
+# Geyser (Bedrock clients on a Java server) if the admin has installed it.
+GEYSER_CONFIG = os.path.join("config", "Geyser-Fabric", "config.yml")
+_YAML_KEY_RE  = re.compile(r'^(\s*)([A-Za-z0-9_.-]+):\s*(.*?)\s*$')
+
 # Only the tail of logs/latest.log is ever read. Rotated .gz archives are slow to
 # unpack, and stitching together the tails of several files would mean searching a
 # history with holes in it — "seen in the recent log" stays one contiguous window.
@@ -494,6 +498,38 @@ def _read_server_properties(gdir: str) -> dict:
     except OSError:
         pass
     return props
+
+
+def _read_bedrock_port(gdir: str) -> int:
+    """Return Geyser's bedrock.port, or None when Geyser isn't installed.
+
+    Scanned by hand rather than with a YAML parser: Flask is this panel's only
+    dependency and one integer under one known key is not worth a second one.
+    The scan is scoped to the top-level `bedrock:` block, because Geyser's
+    config carries a `remote:` block with its own `port:` — the Java server it
+    forwards to — and that is not the port a Bedrock player types in.
+    """
+    path       = os.path.join(gdir, GEYSER_CONFIG)
+    in_bedrock = False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                m = _YAML_KEY_RE.match(line.split("#", 1)[0].rstrip())
+                if not m:
+                    continue
+                indent, key, val = m.groups()
+                if not indent:                      # a top-level key: enters or
+                    in_bedrock = key == "bedrock"   # ends the block we want
+                    continue
+                if in_bedrock and key == "port":
+                    try:
+                        port = int(val.strip("'\""))
+                    except ValueError:
+                        return None
+                    return port if 1 <= port <= 65535 else None
+    except OSError:
+        pass
+    return None
 
 
 def _scan_latest_log(gdir: str) -> list:
@@ -1077,7 +1113,8 @@ def api_server_identity():
 
     # public_ip is host-wide, so every session's Server page gets the same value.
     return jsonify({"ok": True, "has_icon": has_icon, "motd": motd,
-                    "port": port, "public_ip": PUBLIC_IP})
+                    "port": port, "bedrock_port": _read_bedrock_port(gdir),
+                    "public_ip": PUBLIC_IP})
 
 
 @app.route("/api/server/icon")
