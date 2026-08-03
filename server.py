@@ -124,11 +124,24 @@ def tmux_send(command: str, target: str = None) -> None:
 
 
 def tmux_capture(lines: int = 300, target: str = None) -> str:
+    """Read the pane's contents, with lines the pane wrapped put back together.
+
+    A pane is whatever width tmux gave it — 80 columns for a session created
+    detached, and nothing about the panel changes that: we never attach, so we
+    are never a client and never contribute to sizing. `capture-pane` returns
+    *display* lines, so without -J everything long comes back sliced at that
+    width. That is not just cosmetic for the console view: `list` answers on one
+    line naming every player online, and at 80 columns a 10-player server parsed
+    as the single name "Not" while the header still said 10 (verified against
+    tmux 3.4). -J also preserves trailing spaces, so put those back the way -p
+    had them.
+    """
     result = subprocess.run(
-        ["tmux", "capture-pane", "-p", "-t", target or TMUX_TARGET, "-S", f"-{lines}"],
+        ["tmux", "capture-pane", "-p", "-J", "-t", target or TMUX_TARGET,
+         "-S", f"-{lines}"],
         capture_output=True, text=True, check=True,
     )
-    return clean(result.stdout)
+    return "\n".join(line.rstrip() for line in clean(result.stdout).split("\n"))
 
 
 def tmux_pane_path(target: str = None) -> str:

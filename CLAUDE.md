@@ -39,6 +39,23 @@ VibePanel attaches to a tmux pane and reads/writes to it:
 
 The "game directory" is resolved from the **foreground process group's CWD** inside the pane, not the tmux session's startup directory. This is done via `/proc/<shell_pid>/stat` (tpgid field) + `/proc/<tpgid>/cwd` on Linux, with a fallback to `#{pane_current_path}` on macOS/other.
 
+## Pane width, and why `capture-pane` needs `-J`
+
+The panel never attaches — every tmux call is a one-shot subprocess, so we are
+never a client and never influence the pane's size. It is whatever tmux decided:
+the attached admin's terminal, or `default-size` (80x24) for a session created
+detached and never attached.
+
+That matters because `capture-pane` returns *display* lines, already hard-wrapped
+at the pane's width. Without `-J` this silently truncates readback: `list` answers
+on one line naming every player online, and on an 80-column pane a 10-player
+server parsed as the single name `Not` while the header still read 10. `-J`
+rejoins the pieces. It also preserves trailing spaces, which `-p` alone strips, so
+`tmux_capture()` re-strips them to keep the console view as it was.
+
+Note tmux does not reflow scrollback on resize, so one capture can still mix
+lines wrapped at the widths in effect when they were written.
+
 ## Server running detection
 
 `_is_running()` / `_pane_java_info()` use `#{pane_tty}` + `ps -t <tty> -o pid=,args=` to find a `java` process on the pane's tty. This works regardless of process tree depth — a server started as `bash start.sh` (where java is a grandchild of the shell) is detected correctly. Do **not** use `#{pane_current_command}` for this; it only returns the foreground process group leader name, which is `bash` in the wrapper-script case.
