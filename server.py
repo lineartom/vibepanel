@@ -184,6 +184,27 @@ def tmux_pane_path(target: str = None) -> str:
 _WORLD_SAVE_RE = re.compile(r'^world-\d{8}-\d{6}(?:-[a-zA-Z0-9_-]+)?\.tgz$')
 
 
+_PRIV_WRAPPERS = ("su", "sudo", "doas")
+
+
+def _wrapper_runs_a_command(argv: list) -> bool:
+    """True if this su/sudo/doas was handed a command, not asked for a shell.
+
+    An admin sitting in `su - minecraft` is not a running server, and counting
+    one would leave the panel stuck on Running with no way to start anything.
+    A wrapper given a command to run is the case we want.
+    """
+    base, rest = os.path.basename(argv[0]), argv[1:]
+    if base == "su":
+        # su runs a command only when told to: `su mc -c '…'`. Anything else
+        # (`su - mc`) is an interactive shell.
+        return any(t in ("-c", "--command") or t.startswith("--command=") for t in rest)
+    # sudo/doas take the command as trailing words; -i/-s ask for a shell instead.
+    if any(t in ("-i", "-s", "--login", "--shell") for t in rest):
+        return False
+    return any(not t.startswith("-") for t in rest)
+
+
 def _pane_java_info(target: str = None) -> dict:
     """Scan the pane's tty for a java process; returns {"running": bool, "jar": str|None}.
 
@@ -191,6 +212,18 @@ def _pane_java_info(target: str = None) -> dict:
     typed directly, via exec, or as a grandchild of a wrapper script
     (e.g. `bash start.sh` → java).  The tty is inherited by all descendants
     of the pane's shell, so process-tree depth doesn't matter.
+
+    That last part is exactly what a privilege wrapper breaks. Measured with
+    util-linux 2.41 and sudo 1.9, java started from a pane on pts/0 ends up:
+    `su mc -c 'java …'` → no controlling terminal at all (su calls setsid);
+    `su --pty mc -c …` → pts/2; `sudo -u mc java …` → pts/1. None of them are
+    on our tty, and hidepid would hide another user's processes anyway, so all
+    we get to see is the wrapper itself.
+
+    So a wrapper that was handed a command is taken at its word and counted as
+    the server — crude, but the alternative is reporting Stopped for a server
+    that is plainly up. The jar name is dug out of the wrapper's own arguments
+    when it's there (`su mc -c 'java … -jar server.jar'`), unknown when not.
 
     Raises subprocess.CalledProcessError if the tmux target is unreachable.
     """
@@ -207,17 +240,29 @@ def _pane_java_info(target: str = None) -> dict:
         ["ps", "-t", tty, "-o", "pid=,args="],
         capture_output=True, text=True,
     )
+
+    def jar_from(args: str) -> str | None:
+        m = re.search(r"-jar\s+(\S+\.jar)", args)
+        return os.path.basename(m.group(1)) if m else None
+
+    wrapper = None
     for line in ps.stdout.splitlines():
         parts = line.split(None, 1)
         if len(parts) < 2:
             continue
         args = parts[1].strip()
         argv = args.split()
-        if not argv or os.path.basename(argv[0]) != "java":
+        if not argv:
             continue
-        m = re.search(r"-jar\s+(\S+\.jar)", args)
-        return {"running": True, "jar": os.path.basename(m.group(1)) if m else None}
+        base = os.path.basename(argv[0])
+        if base == "java":
+            return {"running": True, "jar": jar_from(args)}
+        # Remember it, but keep looking: seeing java itself is always better.
+        if wrapper is None and base in _PRIV_WRAPPERS and _wrapper_runs_a_command(argv):
+            wrapper = args
 
+    if wrapper:
+        return {"running": True, "jar": jar_from(wrapper)}
     return {"running": False, "jar": None}
 
 

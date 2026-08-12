@@ -60,6 +60,32 @@ lines wrapped at the widths in effect when they were written.
 
 `_is_running()` / `_pane_java_info()` use `#{pane_tty}` + `ps -t <tty> -o pid=,args=` to find a `java` process on the pane's tty. This works regardless of process tree depth — a server started as `bash start.sh` (where java is a grandchild of the shell) is detected correctly. Do **not** use `#{pane_current_command}` for this; it only returns the foreground process group leader name, which is `bash` in the wrapper-script case.
 
+### …unless the server is started through su/sudo
+
+The tty is inherited by descendants, but a privilege wrapper severs exactly that.
+Measured with util-linux 2.41 and sudo 1.9 (a real tmux pane, java on `pts/0`):
+
+| started as | where java ends up |
+|---|---|
+| `su mc -c 'java …'` | `tty ?` — su calls `setsid()`, so java has no controlling terminal |
+| `su --pty mc -c 'java …'` | `pts/2` — a pty of its own |
+| `sudo -u mc java …` | `pts/1` — sudo's `use_pty` |
+
+In every case `ps -t <pane_tty>` shows only the wrapper, so the panel reported
+Stopped for a server that was plainly up. The fallback: a `su`/`sudo`/`doas` on
+the pane's tty **that was handed a command** counts as the server, and the jar
+name is dug out of the wrapper's own arguments when it's there. This is crude on
+purpose — we take the wrapper at its word rather than walking process trees or
+parsing `/proc` for another user's children, which `hidepid` can hide anyway.
+
+`_wrapper_runs_a_command()` is what keeps it from being *too* crude: an admin
+sitting in `su - mc` or `sudo -i` is a shell, not a server, and counting one
+would peg the panel at Running with no way to start anything. `su` needs `-c`;
+`sudo`/`doas` need a trailing command and no `-i`/`-s`.
+
+Seeing a real `java` always wins over the wrapper, so the jar reported for a
+normally-started server is unchanged.
+
 ## Player management (whitelist / ops / bans)
 
 `/api/players/roster` merges `whitelist.json`, `ops.json`, and `banned-players.json`
