@@ -3,6 +3,14 @@
 #   systemctl enable --now vibepanel
 #
 # Adjust User, WorkingDirectory, and --session as needed.
+#
+# WorkingDirectory is where VibePanel keeps vibepanel-state.json — the sessions it
+# expects, where each server's game directory is, and which ones to start at boot.
+# It must be writable by User and must not move, or the panel forgets everything
+# between restarts.
+#
+# --session only needs to be passed once: it declares the set and is remembered.
+# Leaving it here is harmless and makes the unit self-documenting.
 
 [Unit]
 Description=VibePanel — Minecraft web frontend

@@ -153,6 +153,13 @@ function resetSessionUi() {
   $('dl-output').textContent = '';
   $('dl-output-wrap').hidden = true;
 
+  // Not cosmetic: a tick left from the previous server misreports this one's
+  // setting, and the next click would POST that intent at the wrong session.
+  $('srv-autostart-card').hidden   = true;
+  $('srv-autostart').checked       = false;
+  $('srv-autostart').disabled      = false;
+  $('srv-autostart-note').textContent = '';
+
   // Drafts aimed at one particular server.
   $('say-input').value        = '';
   $('char-count').textContent = `0 / ${MAX_LEN}`;
@@ -846,12 +853,18 @@ function renderSystemStats(stats) {
   const el = $('system-stats');
   if (!stats) { el.hidden = true; return; }
 
-  function bar(label, used, total, extra) {
-    const pct = total > 0 ? Math.min(100, used / total * 100) : 0;
-    const cls = pct > 90 ? 'stat-fill--danger' : pct > 75 ? 'stat-fill--warn' : '';
+  // `peak` is in the same unit as `used`; the notch is left unmarked by design —
+  // the tooltip carries the number so the row stays as narrow as it was.
+  function bar(label, used, total, extra, peak, peakText) {
+    const frac = v => total > 0 ? Math.max(0, Math.min(100, v / total * 100)) : 0;
+    const pct  = frac(used);
+    const cls  = pct > 90 ? 'stat-fill--danger' : pct > 75 ? 'stat-fill--warn' : '';
+    const mark = peak == null ? ''
+      : `<div class="stat-peak" style="left:${frac(peak).toFixed(1)}%" ` +
+        `title="peak ${esc(peakText)}"></div>`;
     return `<div class="stat-row">
       <span class="stat-label">${label}</span>
-      <div class="stat-bar"><div class="stat-fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div>
+      <div class="stat-bar"><div class="stat-fill ${cls}" style="width:${pct.toFixed(1)}%"></div>${mark}</div>
       <span class="stat-value">${extra}</span>
     </div>`;
   }
@@ -861,15 +874,18 @@ function renderSystemStats(stats) {
   if (cpu) {
     const pct = Math.min(100, cpu.load_1m / cpu.cores * 100);
     html += bar('CPU', cpu.load_1m, cpu.cores,
-      `${pct.toFixed(0)}%&ensp;<span class="stat-detail">${cpu.load_1m} / ${cpu.cores} cores</span>`);
+      `${pct.toFixed(0)}%&ensp;<span class="stat-detail">${cpu.load_1m} / ${cpu.cores} cores</span>`,
+      cpu.peak, `${cpu.peak} load`);
   }
   if (stats.ram) {
     html += bar('RAM', stats.ram.used, stats.ram.total,
-      `${fmtBytes(stats.ram.used)} / ${fmtBytes(stats.ram.total)}`);
+      `${fmtBytes(stats.ram.used)} / ${fmtBytes(stats.ram.total)}`,
+      stats.ram.peak, fmtBytes(stats.ram.peak));
   }
   if (stats.disk) {
     html += bar('Disk', stats.disk.used, stats.disk.total,
-      `${fmtBytes(stats.disk.used)} / ${fmtBytes(stats.disk.total)}`);
+      `${fmtBytes(stats.disk.used)} / ${fmtBytes(stats.disk.total)}`,
+      stats.disk.peak, fmtBytes(stats.disk.peak));
   }
   el.innerHTML = html;
   el.hidden = !html;
@@ -886,13 +902,41 @@ function renderDiskInfo(elementId) {
 
 // ── Overview ─────────────────────────────────────────────
 
-// Per-session cache: { [sessionName]: { running, jar, playerCount, playersLoaded } }
+// Per-session cache: { [sessionName]: { running, jar, playerCount, playersLoaded, heap } }
 const overviewCache   = {};
 let overviewPollTimer = null;
 
+const REFRESH_MIN = 1, REFRESH_MAX = 3600, REFRESH_DEFAULT = 15;
+const REFRESH_KEY = 'vibepanel.overviewRefreshSecs';
+const REFRESH_ON_KEY = 'vibepanel.overviewRefreshOn';
+
+// Clamp rather than reject: this rate only drives a repeating fetch, so the
+// worst a silly value can do is hammer the panel — and the box is a spinner,
+// so a stray keystroke shouldn't be able to.
+function refreshSecs() {
+  const raw = parseInt(localStorage.getItem(REFRESH_KEY), 10);
+  if (!Number.isFinite(raw)) return REFRESH_DEFAULT;
+  return Math.max(REFRESH_MIN, Math.min(REFRESH_MAX, raw));
+}
+
+// Anything but an explicit 'off' means on, so a missing or garbled key leaves
+// auto-refresh working rather than silently leaving a stale page on screen.
+function refreshOn() {
+  return localStorage.getItem(REFRESH_ON_KEY) !== 'off';
+}
+
 function overviewStartPolling() {
   loadOverview();
-  overviewPollTimer = setInterval(refreshOverviewStatus, 15000);
+  overviewRestartTimer();
+}
+
+// Off leaves overviewPollTimer null, which is the same state as being on
+// another page — in both cases there is simply nothing scheduled.
+function overviewRestartTimer() {
+  clearInterval(overviewPollTimer);
+  overviewPollTimer = refreshOn()
+    ? setInterval(refreshOverviewStatus, refreshSecs() * 1000)
+    : null;
 }
 
 function overviewStopPolling() {
@@ -913,6 +957,7 @@ async function loadOverview() {
       const res  = await fetch(`/api/server/status?s=${encodeURIComponent(s)}`);
       const data = await res.json();
       overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar, playerCount: null, playersLoaded: false };
+      if (!data.running) overviewCache[s].heap = null;
     } catch {
       overviewCache[s] = { ...overviewCache[s], running: null };
     }
@@ -920,19 +965,34 @@ async function loadOverview() {
   }));
   renderOverviewCards();
 
-  // 2. Fetch player counts only for sessions that are running.
+  // 2. Fetch player counts and heap usage only for sessions that are running.
   await Promise.all(targets.filter(s => overviewCache[s]?.running).map(async s => {
-    try {
-      const res  = await fetch(`/api/players?s=${encodeURIComponent(s)}`);
-      const data = await res.json();
-      overviewCache[s].playerCount  = data.ok ? data.count  : null;
-      overviewCache[s].playerMax    = data.ok ? data.max    : null;
-      overviewCache[s].playersLoaded = true;
-    } catch {
-      overviewCache[s].playersLoaded = true;
-    }
+    const players = (async () => {
+      try {
+        const res  = await fetch(`/api/players?s=${encodeURIComponent(s)}`);
+        const data = await res.json();
+        overviewCache[s].playerCount  = data.ok ? data.count  : null;
+        overviewCache[s].playerMax    = data.ok ? data.max    : null;
+        overviewCache[s].playersLoaded = true;
+      } catch {
+        overviewCache[s].playersLoaded = true;
+      }
+    })();
+    await Promise.all([players, fetchHeap(s)]);
   }));
   renderOverviewCards();
+}
+
+// Sampling the heap is also what records its peak server-side, so this runs on
+// every overview refresh — but only on those. No timer of its own. The read is
+// a 32 KB file on the panel's own host, so it is cheap enough to sit inline.
+async function fetchHeap(session) {
+  let heap = null;
+  try {
+    const res = await fetch(`/api/server/heap?s=${encodeURIComponent(session)}`);
+    heap = await res.json();
+  } catch { /* leave heap null: card simply shows no bar */ }
+  if (overviewCache[session]) overviewCache[session].heap = heap;
 }
 
 async function refreshOverviewStatus() {
@@ -944,6 +1004,8 @@ async function refreshOverviewStatus() {
       const data = await res.json();
       const wasRunning = overviewCache[s]?.running;
       overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar };
+      if (data.running) await fetchHeap(s);
+      else overviewCache[s].heap = null;
       // If a server just came up, fetch its player count too.
       if (!wasRunning && data.running) {
         overviewCache[s].playerCount   = null;
@@ -995,6 +1057,7 @@ function renderOverviewCards() {
           <span class="srv-dot ${dotCls}"></span>
           <span class="overview-status-label">${label}</span>
         </div>
+        ${heapBlock(d)}
         ${players}
         ${jarLine}
       </div>`;
@@ -1005,11 +1068,92 @@ function renderOverviewCards() {
   });
 }
 
+// Heap bar: the track is the reserved heap (-Xmx), the fill is the live set as
+// of the last GC, and the notch is the highest live set seen since this JVM
+// started. "live" rather than "used" on purpose — the JVM publishes these
+// counters at collection boundaries, so this is what survived the last GC, not
+// what is occupied this instant. See _read_heap() for why that's the better
+// number to draw.
+function heapBlock(d) {
+  const h = d?.heap;
+  if (!h) return '';
+  if (!h.ok) {
+    return `<div class="overview-heap-note" title="${esc(h.error || '')}">heap unavailable</div>`;
+  }
+  const max = h.reserved || h.committed || 0;
+  if (!max) return '';
+  const pct     = v => Math.max(0, Math.min(100, v / max * 100));
+  const usedPct = pct(h.used);
+  const peakPct = pct(h.peak);
+  const gcs     = h.collections != null ? `, after ${h.collections.toLocaleString()} collections` : '';
+  const title   = `${fmtBytes(h.used)} live${gcs} — peak ${fmtBytes(h.peak)}, ` +
+                  `${fmtBytes(h.committed)} committed, ${fmtBytes(max)} reserved`;
+  return `
+    <div class="overview-heap" title="${esc(title)}">
+      <div class="heap-bar">
+        <div class="heap-bar-used" style="width:${usedPct.toFixed(1)}%"></div>
+        <div class="heap-bar-peak" style="left:${peakPct.toFixed(1)}%"></div>
+      </div>
+      <div class="heap-figures">
+        <span class="heap-fig-used">${fmtBytes(h.used)} live</span>
+        <span class="heap-fig-peak">peak ${fmtBytes(h.peak)}</span>
+        <span class="heap-fig-max">max ${fmtBytes(max)}</span>
+      </div>
+    </div>`;
+}
+
 function goToSession(session) {
   clickSessionTab(session);
 }
 
 $('btn-overview-refresh').addEventListener('click', loadOverview);
+
+const refreshInput  = $('overview-refresh-secs');
+const refreshToggle = $('btn-refresh-toggle');
+
+// The interval box stays visible when auto-refresh is off, but inert: the rate
+// it holds is not in play, and hiding it would shuffle the header on every
+// toggle. The manual Refresh button is unaffected either way.
+function applyRefreshUi() {
+  const on = refreshOn();
+  refreshToggle.textContent = on ? 'every' : 'off';
+  refreshToggle.title = on ? 'Turn auto-refresh off' : 'Turn auto-refresh on';
+  refreshInput.disabled = !on;
+  $('refresh-rate').classList.toggle('refresh-rate--off', !on);
+}
+
+refreshInput.value = refreshSecs();
+applyRefreshUi();
+
+// 'change' rather than 'input': committing on every keystroke would restart the
+// timer at 1 s the moment someone types the "1" of "120".
+refreshInput.addEventListener('change', () => {
+  localStorage.setItem(REFRESH_KEY, refreshInput.value);
+  const secs = refreshSecs();
+  localStorage.setItem(REFRESH_KEY, secs);   // store the clamped value, not the typed one
+  refreshInput.value = secs;                 // and show what was actually accepted
+  if (activePage === 'overview') overviewRestartTimer();
+});
+
+refreshToggle.addEventListener('click', () => {
+  localStorage.setItem(REFRESH_ON_KEY, refreshOn() ? 'off' : 'on');
+  applyRefreshUi();
+  // Restarting covers both directions: it schedules a timer when switching on,
+  // and clears the existing one when switching off.
+  if (activePage === 'overview') overviewRestartTimer();
+});
+
+$('btn-reset-peaks').addEventListener('click', async () => {
+  const btn = $('btn-reset-peaks');
+  btn.disabled = true;
+  try {
+    await fetch('/api/peaks/reset', { method: 'POST' });
+  } catch { /* nothing to undo: a failed reset just leaves the old peaks */ }
+  btn.disabled = false;
+  // Peaks are recorded server-side as a side effect of sampling, so the way to
+  // see the reset is to sample again — which loadOverview does for every card.
+  loadOverview();
+});
 
 // ── Server ───────────────────────────────────────────────
 
@@ -1023,6 +1167,7 @@ function srvStartPolling() {
   loadJars();
   loadServerIdentity();
   loadLatestMinecraft();
+  loadAutostart();
   srvPollTimer = setInterval(loadServerStatus, 5000);
 }
 
@@ -1176,6 +1321,13 @@ async function loadJars() {
     }
     if (data.jars.length === 1) selectedJar = data.jars[0];
 
+    // Same idea for memory: offer what this server last ran with, so a 4G
+    // server doesn't quietly come back at the 1024M default. Never clobber a
+    // value the admin is in the middle of typing.
+    if (data.last_mem && document.activeElement !== $('mem-input')) {
+      $('mem-input').value = data.last_mem;
+    }
+
     wrap.innerHTML = '<div class="jar-list"></div>';
     const list = wrap.querySelector('.jar-list');
     data.jars.forEach(jar => {
@@ -1203,12 +1355,67 @@ function selectJar(jar) {
   $('btn-start').disabled = false;
 }
 
+// ── Autostart ─────────────────────────────────────────────
+//
+// A standing per-server policy, so it stays togglable whether the server is
+// running or stopped — unlike the start form, which goes inert while it runs.
+
+function renderAutostart(d) {
+  $('srv-autostart-card').hidden  = false;
+  $('srv-autostart').checked      = !!d.autostart;
+  $('srv-autostart').disabled     = false;
+
+  // Say what it would actually do. Wrong-game-dir is the failure this panel is
+  // hardest to diagnose, so the directory it believes in is worth the line.
+  const note = $('srv-autostart-note');
+  if (d.problem) {
+    note.textContent = d.autostart ? `Cannot start it yet: ${d.problem}.` : `${d.problem}.`;
+  } else {
+    note.textContent = `Will run ${d.jar} with ${d.mem} in ${d.dir}` +
+                       (d.dir_confirmed ? '.' : ' (directory not confirmed yet).');
+  }
+}
+
+async function loadAutostart() {
+  try {
+    const data = await sessionJson('/api/server/autostart');
+    if (data === STALE) return;      // reply was for the server we just left
+    if (!data.ok) { $('srv-autostart-card').hidden = true; return; }
+    renderAutostart(data);
+  } catch (_) {
+    $('srv-autostart-card').hidden = true;
+  }
+}
+
+$('srv-autostart').addEventListener('change', async () => {
+  const box = $('srv-autostart');
+  const want = box.checked;
+  box.disabled = true;
+  try {
+    const data = await sessionJson('/api/server/autostart', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ autostart: want }),
+    });
+    if (data === STALE) return;      // the write landed; only the redraw is stale
+    if (data.ok) { renderAutostart(data); return; }
+    box.checked = !want;
+    $('srv-autostart-note').textContent = data.error || 'Could not save that.';
+  } catch (err) {
+    box.checked = !want;
+    $('srv-autostart-note').textContent = err.message;
+  } finally {
+    box.disabled = false;
+  }
+});
+
 $('btn-srv-refresh').addEventListener('click', () => {
   jarsLoaded = false;
   loadServerStatus();
   loadJars();
   loadServerIdentity();
   loadLatestMinecraft();
+  loadAutostart();
 });
 
 // ── Download Fabric ───────────────────────────────────────

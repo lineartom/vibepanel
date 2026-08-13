@@ -561,6 +561,13 @@ a { text-decoration: none; color: inherit; }
   word-break: break-all;
 }
 
+/* Standing policy rather than an action, so it sits quieter than the start
+   form below it: the label carries the meaning, the note carries the effect. */
+#srv-autostart-card { flex-shrink: 0; gap: 0; }
+#srv-autostart-card .checkbox-label { font-size: .95rem; color: var(--text); }
+#srv-autostart-note { padding: .35rem 0 0 1.4rem; font-size: .8rem; }
+#srv-autostart-note:empty { display: none; }
+
 .mem-card { flex-shrink: 0; }
 .mem-input {
   background: var(--bg0);
@@ -784,6 +791,40 @@ a { text-decoration: none; color: inherit; }
 /* ── System stats (overview) ────────────────────────────── */
 #page-overview { overflow-y: auto; }
 
+.refresh-rate {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .8rem;
+  color: var(--text2);
+  white-space: nowrap;
+}
+.refresh-rate-input {
+  width: 4.5rem;
+  padding: .3rem .4rem;
+  font-size: .8rem;
+  text-align: right;
+}
+/* Reads as the word it replaces until you hover it, then it is plainly a control */
+.refresh-toggle {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: .15rem .35rem;
+  color: var(--text2);
+  font: inherit;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.refresh-toggle:hover { background: var(--bg2); border-color: var(--border); color: var(--text); }
+.refresh-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* Off: the interval is still shown, but nothing about it is in play */
+.refresh-rate--off .refresh-toggle { color: var(--text); font-weight: 600; }
+.refresh-rate--off .refresh-rate-input,
+.refresh-rate--off .refresh-rate-unit { opacity: .45; }
+.refresh-rate-input:disabled { cursor: not-allowed; }
+
 #system-stats {
   display: flex;
   flex-direction: column;
@@ -807,11 +848,22 @@ a { text-decoration: none; color: inherit; }
   color: var(--text2);
 }
 .stat-bar {
+  position: relative;        /* anchors .stat-peak */
   flex: 1;
   height: 8px;
   background: var(--bg3);
   border-radius: 4px;
   overflow: hidden;
+}
+/* Highest value seen, marked but not labelled — the number is in the tooltip. */
+.stat-peak {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;         /* centre the notch on its value */
+  background: var(--text);
+  transition: left .4s;
 }
 .stat-fill {
   height: 100%;
@@ -875,6 +927,49 @@ a { text-decoration: none; color: inherit; }
   color: var(--green);
 }
 .overview-players-loading { color: var(--text3); }
+/* Heap bar (prototype): track = reserved heap, fill = in use, notch = peak */
+.overview-heap {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+}
+.heap-bar {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg3);
+  overflow: hidden;
+}
+.heap-bar-used {
+  height: 100%;
+  background: var(--green);
+  border-radius: 3px 0 0 3px;
+  transition: width .3s;
+}
+.heap-bar-peak {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  margin-left: -1px;          /* centre the notch on its value */
+  background: var(--text);
+  transition: left .3s;
+}
+.heap-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .1rem .5rem;
+  font-size: .7rem;
+  color: var(--text2);
+}
+.heap-fig-used { color: var(--green); }
+.heap-fig-max  { color: var(--text3); }
+.overview-heap-note {
+  font-size: .7rem;
+  color: var(--text3);
+  cursor: help;
+}
+
 .overview-jar {
   font-family: 'SF Mono', 'Consolas', 'Menlo', monospace;
   font-size: .73rem;

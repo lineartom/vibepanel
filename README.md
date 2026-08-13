@@ -32,23 +32,67 @@ python server.py --session minecraft --port 8080
 
 Open `http://<host>:8080` in a browser. The `--session` value should match the name of your tmux session (`tmux ls` to check). If you only have one tmux session, the name doesn't matter — VibePanel will find it automatically.
 
+### VibePanel remembers your servers
+
+You only need to name your sessions once. `--session` **declares** which servers you
+have, and VibePanel writes that list to `vibepanel-state.json` in its own working
+directory, so the next run is simply `python server.py`:
+
+```bash
+python server.py --session survival --session creative   # first time
+python server.py                                          # every time after
+```
+
+To forget a server, just stop passing it. To swap the set, declare the new one.
+
+Alongside each session it remembers **where that server lives**, which it works out
+by watching rather than by being told. While a server is stopped it notes the pane's
+current directory as a best guess; the moment it sees the server actually running it
+takes that process's own working directory, which is the game directory by
+definition, and trusts it from then on. Once VibePanel knows where a server lives it
+can reopen that tmux session for you — after a reboot, or if something kills it —
+with a shell already in the right place.
+
+It only ever opens a shell. Starting the server is yours to do, unless you ask for
+it explicitly:
+
+### Starting a server automatically
+
+On the **Server** tab there's a checkbox: *Start this server when VibePanel starts*.
+It's off by default and it's per server.
+
+Ticked, that server starts every time the VibePanel process starts — after a reboot,
+after `systemctl restart vibepanel`, whenever. There's no cleverness behind it: it
+does not try to work out whether the server was running before, or why the panel
+started. It runs the jar and memory that server last used, and it won't start a
+second copy of one that's already up. Unticked, nothing ever happens.
+
+Whatever it does, it says so in the log (`journalctl -u vibepanel`).
+
 ## Configuration
+
+Most people need none of these — session names and game directories are remembered.
 
 | Flag | Env var | Default | Purpose |
 |---|---|---|---|
-| `--session` | `TMUX_TARGET` | `minecraft` | tmux target for the Minecraft pane |
+| `--session` | `TMUX_TARGET` | `minecraft` | tmux target; repeat for several servers. Declares the set and is remembered |
 | `--port` | — | `8080` | HTTP port |
+| `--state-file` | `STATE_FILE` | `./vibepanel-state.json` | where VibePanel keeps what it remembers |
 | `--jars-dir` | `JARS_DIR` | `server-jars` | where downloaded `.jar` files are stored |
 | `--worlds-dir` | `WORLDS_DIR` | `world-saves` | where world `.tgz` backups are stored |
 | `--mods-dir` | `MODS_DIR` | `mods` | active Fabric mods directory |
 | `--mods-saves-dir` | `MODS_SAVES_DIR` | `mods-saves` | inactive mods directory |
-| `--server-dir` | `SERVER_DIR` | *(none)* | cd here before starting the server (resolved to an absolute path at startup) |
+| `--server-dir` | `SERVER_DIR` | *(none)* | fallback game directory for a session VibePanel has never seen; normally learned instead |
 
 All paths are relative to the Minecraft server's working directory (auto-detected from the tmux pane).
 
 ## Running as a service
 
 A systemd unit file is included. Edit `vibepanel.service` to set `User`, `WorkingDirectory`, and your `--session`, then:
+
+`WorkingDirectory` is where VibePanel keeps what it remembers, so it needs to be
+writable by `User` and to stay put. `enable` (not just `start`) is what makes any of
+the boot-time behaviour happen at all.
 
 ```bash
 sudo cp vibepanel.service /etc/systemd/system/

@@ -6,23 +6,32 @@
 python server.py                                        # defaults: 0.0.0.0:8080, tmux session "minecraft"
 python server.py --port 5000 --session mc               # custom port and session name
 python server.py --session survival --session creative  # multiple servers; shows tab switcher
+python server.py                                        # ...and after that, just this
 ```
 
 All config can also be set via environment variables (see below).
+
+Three words are used consistently throughout the code and these notes: a **server**
+is one game instance, a **session** is the tmux session it lives in, and the
+**panel** is the VibePanel process.
 
 `SERVER_DIR` is the one configured path that is made absolute at startup, because
 it lands in a `cd` that runs *inside the tmux pane* — where the working directory
 is the game dir, not the panel's — so a relative value would resolve against a
 base the admin never chose. The `*_DIR` settings stay relative: they are joined
 onto the game dir with `os.path.join`, which still accepts an absolute override.
+`PANEL_STATE_FILE` is absolute for a related reason: it is resolved against the
+CWD *at import*, which is the panel's working directory, so nothing that chdirs
+later can move the store.
 
 ## CLI flags / environment variables
 
 | Flag | Env var | Default | Purpose |
 |---|---|---|---|
-| `--session` | `TMUX_TARGET` | `minecraft` | tmux target; **repeat** for multiple servers: `--session mc1 --session mc2` |
+| `--session` | `TMUX_TARGET` | `minecraft` | tmux target; **repeat** for multiple servers: `--session mc1 --session mc2`. **Declares** the expected set and is remembered — see below |
+| `--state-file` | `STATE_FILE` | `./vibepanel-state.json` | the panel store; relative to the panel's own working directory |
 | `--jars-dir` | `JARS_DIR` | `server-jars` | dir (relative to game dir) where .jar files live |
-| `--server-dir` | `SERVER_DIR` | *(none)* | cd here before starting the server; resolved to an absolute path (and `~` expanded) at startup |
+| `--server-dir` | `SERVER_DIR` | *(none)* | **fallback** game dir for a session the panel has never seen; normally learned instead. Resolved to an absolute path (and `~` expanded) at startup |
 | `--worlds-dir` | `WORLDS_DIR` | `world-saves` | dir for world .tgz backups |
 | `--mods-dir` | `MODS_DIR` | `mods` | active mods directory |
 | `--mods-saves-dir` | `MODS_SAVES_DIR` | `mods-saves` | inactive (stashed) mods directory |
@@ -34,10 +43,152 @@ onto the game dir with `os.path.join`, which still accepts an absolute override.
 VibePanel attaches to a tmux pane and reads/writes to it:
 
 - If `--session` names a session that exists, that session is used.
-- If the named session is not found **and there is exactly one tmux session visible**, that sole session is adopted automatically (useful when the user hasn't named their session).
+- If the named session is not found **and there is exactly one tmux session visible**, that sole session is adopted automatically (useful when the user hasn't named their session) — **unless the store already knows that session's directory**, in which case we can recreate it ourselves and adoption would repoint at the wrong server.
+- If it is still not found and we know where it belongs, `_ensure_session()` creates it — see below.
 - If no tmux is reachable at all, status endpoints return 503.
 
 The "game directory" is resolved from the **foreground process group's CWD** inside the pane, not the tmux session's startup directory. This is done via `/proc/<shell_pid>/stat` (tpgid field) + `/proc/<tpgid>/cwd` on Linux, with a fallback to `#{pane_current_path}` on macOS/other.
+
+## The panel store
+
+There are **two** state files, split by who owns the facts:
+
+| state | file | why there |
+|---|---|---|
+| expected sessions, each one's `dir` / `dir_confirmed`, `autostart` | `vibepanel-state.json` in the **panel's** working directory | panel configuration — and a session's directory cannot live inside the directory it identifies |
+| `last_jar`, `last_mem` | `.vibepanel.json` in each **game** dir | facts about that particular game, which travel with it |
+
+The store is held in memory and **flushed only when something changes**
+(`_update_session_state()` returns whether it did): a status poll that re-observes
+the same thing must not rewrite the file every five seconds. Writes take
+`_PANEL_LOCK` — `app.run(threaded=True)` and there are now several writers — and use
+the same atomic `.tmp` + `os.replace` as the game-dir file. A directory we cannot
+write to prints once and the panel carries on from memory; a panel that cannot
+persist is still a working panel, one that refuses to start is not.
+
+`--session` **declares** the expected set rather than adding to it: passing it
+replaces what was stored, which is what gives an admin a way to forget a session —
+stop passing it. Passing nothing reuses the last declared set, so every run after
+the first is just `server.py`. `_set_expected_sessions()` drops the entries for
+sessions no longer named, directory and all: keeping a stale directory around to be
+silently re-adopted later is worse than re-learning it.
+
+### Learning a session's directory, and when to believe it
+
+`tmux_pane_path()` reports the CWD of the pane's **foreground** process, and what
+that is worth depends entirely on what is in the foreground:
+
+| | foreground process | worth |
+|---|---|---|
+| server stopped | the admin's shell, which may be anywhere | a guess — see the empty-roster note below, this is the classic wrong-dir trap |
+| server running | the server itself | a fact: its CWD **is** the game dir |
+
+So `_observe_session()` records a directory plus how much we trust it. It is called
+from `/api/server/status` — which every page polls, for every session, so it sees
+the stopped → running edge — and once per session at startup.
+
+- **stopped → running**: read the server's CWD and store it `dir_confirmed: True`.
+- **stopped, dir absent or unconfirmed**: store the pane's CWD, `dir_confirmed: False`.
+- **stopped, dir already confirmed**: do nothing.
+
+A confirmed directory is **never** downgraded by a wandering shell. An admin who
+`cd`s out of the game dir with the server down is not evidence against something we
+watched java do, and letting that un-learn it would throw away the only observation
+we were sure of.
+
+Two things the edge handling gets right on purpose:
+
+- **Prefer `/proc/<java_pid>/cwd`** (`_running_game_dir()`). `_pane_java_info()`
+  already returns `pid`, and reading java directly beats the pane for the
+  `bash start.sh` case, where the foreground group leader is the wrapper script.
+  Falls back to `tmux_pane_path()` when that read isn't available (`hidepid`,
+  another user, no `/proc`).
+- **Never learn from the su/sudo case.** There `pid` is `None`, java is off our tty
+  entirely, and the pane's foreground process is the privilege wrapper — whose CWD
+  is wherever the admin's shell was. Recording it would poison the store with a
+  confident-looking wrong path.
+
+Only the *edge* triggers a read; a server cannot change its own CWD, so re-reading
+`/proc` on every poll would buy nothing. This is deliberately **not** folded into
+`_pane_java_info()`, which stays a pure query — it is a side effect of *serving
+status*, the same shape as `_record_peak()`.
+
+### Creating a missing session
+
+`_ensure_session()` opens a session that isn't there, with `new-session -d -c <dir>`
+so its shell starts in the right place. It runs at startup for every expected
+session, and again from `/api/server/status` whenever the pane turns out to be
+unreachable — that endpoint is what every page polls, so it is where a session
+killed mid-life gets noticed. Hanging the recreate off the *failure* path rather
+than a `has-session` check up front keeps the ordinary case free.
+
+The directory is the store's learned `dir`, falling back to `SERVER_DIR`, and
+**nothing is created when neither is known**. That condition is the whole design:
+a session opened in the wrong place is worse than no session, because the panel
+would look healthy while listing someone else's files.
+
+**It returns `"exists"` / `"created"` / `"failed"`, not a bool**, and the difference
+between the first two decides how a caller may resolve the game dir — that is what
+`_game_dir(target, ensured)` is for. On a session we just created the game dir is
+the directory we passed to `-c`, *by construction*. Asking `tmux_pane_path()` to
+tell us back would be both a round trip to rediscover what we just asserted and a
+race: `new-session -d` returns before the child has chdir'd and exec'd, and
+`/proc/<tpgid>/cwd` inside that window is the **tmux server's** CWD. Nothing raises
+— it is a plausible wrong path, which then reads an absent `.vibepanel.json`,
+gets `{}`, and leaves autostart quietly not firing with nothing saying why.
+
+Before typing into a pane we just made, `_wait_for_shell()` polls until the pane's
+foreground process group is the shell itself (`tpgid == pane_pid`), bounded at 2 s.
+A readiness check rather than a magic sleep; anything unexpected reads as ready,
+since waiting forever is worse than typing early.
+
+What gets created is a **plain shell, never a server** — the panel does not decide
+on its own to run a jar. `/api/server/start` therefore no longer creates a session
+with the java command as its process. That path was unreachable anyway (resolving
+the game dir above it already requires a pane), and it built a session whose life
+was tied to the server's: stopping the server took the pane with it, and the panel
+reads that pane afterwards.
+
+## Starting a server, and starting one at boot
+
+`_start_server()` is the single start path — the Start button and the autostart pass
+both come through it, so what happens at boot is exactly what happens on a click. It
+raises `StartError`, which carries the status the endpoint should return.
+
+The `cd` goes to **`gdir`, the same directory the jar was just listed from**, so the
+server's CWD and its jar can never disagree. It used to go to `SERVER_DIR`, which
+only lined up when the pane already happened to be there; with the pane elsewhere it
+ran a jar from one game dir with the working directory of another. The two callers
+supply `gdir` differently, and the difference is the point:
+
+- **the endpoint** passes `tmux_pane_path()` — if an admin `cd`s the pane to a
+  different game and presses Start, they get *that* game. The store is for creating
+  a session, not for overriding a live one.
+- **autostart** passes the stored `dir`, because there is no admin at a pane to
+  follow.
+
+### The autostart checkbox
+
+Per-server, on the Server tab, **default off**, stored as `autostart` in the panel
+store. Nothing infers anything: not whether the server was running before, not why
+the panel started, not how long the host has been up. Ticked means it starts
+whenever the panel process starts; unticked means nothing ever happens. It lives in
+the panel store rather than the game dir precisely so that reading it never depends
+on resolving a directory first — which is the condition autostart runs under.
+
+`_autostart_plan()` walks the chain **panel store → dir → `.vibepanel.json` → jar+mem**
+and reports a broken link as itself: "we have never seen this session" and "its disk
+did not come back after the reboot" are different problems with different fixes, and
+a blank field would say neither. Every outcome prints — somebody who finds a server
+running must be able to see in the panel's own log that the panel did it.
+
+The one check in `_autostart_pass()` that is **not** policy is `_is_running()`:
+`systemctl restart vibepanel` on a healthy host must not type a second JVM into a
+running server's pane.
+
+A tmux that cannot start at all would otherwise reprint its error on every poll,
+so failures are logged once per session (`_AUTOSTART_FAILED`) and the note is
+cleared as soon as the session exists.
 
 ## Pane width, and why `capture-pane` needs `-J`
 
@@ -123,6 +274,12 @@ it does while java is running. `/api/server/status` carries an `ok` flag for the
 reason: an unreachable tmux pane and an idle one both report `running: false`, and the
 UI has to be able to tell them apart.
 
+The roster still resolves its own game dir per request, so this trap is unchanged
+here — but the panel store now records what it believes for each session, and the
+Server page's autostart note shows it. `vibepanel-state.json` is the quickest way to
+see whether the panel and the admin disagree about where a server lives, and a `dir`
+carrying `dir_confirmed: true` was read off a server that was actually running there.
+
 Names are validated against `^[A-Za-z0-9_]{1,16}$` before ever reaching a console
 command; ban reasons go through `pane_text()` — see the section below.
 
@@ -151,6 +308,127 @@ the top-level `bedrock:` block, because the same file's `remote:` block also has
 `port:` — the Java server Geyser forwards to — which is emphatically not the port a
 Bedrock player types in.
 
+## Heap utilisation on the Overview cards (prototype)
+
+`/api/server/heap` reads the JVM's own performance counters out of
+`/tmp/hsperfdata_<user>/<pid>` and returns `used` / `committed` / `reserved` / `peak`
+in bytes, plus `collections`. The Overview card draws them as one bar: the track is
+`reserved` (-Xmx), the fill is `used`, and a notch marks `peak`. `_pane_java_info()`
+also returns `pid` — the java process itself, `None` in the su/sudo case, since a
+wrapper's pid is no use to anything wanting to read a JVM's counters.
+
+Every HotSpot JVM memory-maps that file and keeps it current as a matter of course;
+it is what `jstat` reads. The format is a documented binary — 32-byte prologue, then
+variable-length named entries — at version 2.0 since Java 5, and `_read_perf_counters()`
+parses it in about forty lines. **No JDK is required and the server is not touched at
+all**, which is the whole point.
+
+### Why not jcmd
+
+The first version of this shelled out to `jcmd <pid> GC.heap_info`, and it was
+replaced because it was expensive — but not for the reason it looked. Measured over
+50 samples against an idle JVM:
+
+| | wall | CPU (client) | CPU inside the target JVM |
+|---|---|---|---|
+| `jcmd GC.heap_info` | 3.07 s | 4.69 s | 0.01 s |
+| reading hsperfdata | 0.02 s | 0.02 s | 0.00 s |
+
+`GC.heap_info` costs the Minecraft server about 0.2 ms; it is not scrutinising
+anything costly. The ~94 ms per sample was **`jcmd` itself booting a second JVM** to
+speak the attach protocol — `jcmd -h`, which contacts nothing, still costs 30 ms.
+`jstat` reads exactly the counters we now read but pays the same startup tax, so it
+would be strictly worse than reading the file ourselves.
+
+**There is deliberately no fallback to jcmd.** A server whose counters we cannot read
+shows no bar and the reason in a tooltip. A fallback would quietly change what the
+number means (see below) *and* reintroduce the CPU cost on exactly the machines that
+were already unhappy — better that an admin sees "heap unavailable" and decides.
+
+### `used` is the live set, not occupancy — and that is the point
+
+HotSpot refreshes these counters at GC boundaries, so `used` is what survived the
+last collection rather than what is occupied this instant. The difference is not
+subtle. A churning Parallel heap, sampled repeatedly:
+
+```
+hsperfdata used=161.5M     jcmd used=499.0M
+hsperfdata used=161.5M     jcmd used=379.6M     ← same live set,
+hsperfdata used=161.5M     jcmd used=501.5M       jcmd sampling eden's sawtooth
+```
+
+The live set is the better of the two figures here, and the only one worth a peak
+marker: a healthy server fills eden to near its limit before collecting *by design*,
+so a peak taken from instantaneous occupancy saturates within minutes and stops
+saying anything. It also means the bar moves in steps at collections rather than
+flickering. The UI says "live", not "used", so the distinction survives contact with
+whoever reads it next.
+
+Before the first collection every counter is still zero, which would render as a
+server using no heap at all — so `collections == 0` is refused with "waiting for the
+first GC" instead. It resolves within seconds on a real server.
+
+### Deriving the maximum
+
+No counter states the whole heap's maximum, so `_heap_from_counters()` derives it,
+and the two collector families disagree about what a generation's max means. With
+`-Xmx1g`, verified on JDK 25:
+
+| collector | `generation.0.maxCapacity` | `generation.1.maxCapacity` | whole heap |
+|---|---|---|---|
+| G1 | 1024M | 1024M | 1024M — one shared region pool, each generation reports all of it |
+| ZGC | 1024M | 1024M | 1024M — likewise |
+| Parallel | 341M | 683M | 1024M — a fixed young/old split, so these sum |
+| Serial | 341M | 683M | 1024M — likewise |
+
+Hence: identical maxima mean a shared pool, differing ones get summed. The one way
+that misreads is Parallel or Serial with `-Xmn` at exactly half of `-Xmx`, so it is
+backstopped by an invariant — a heap cannot be committed beyond its reservation, and
+if it appears to be, the sum was right after all. Do not reach for
+`sun.gc.policy.name` to tell the collectors apart: it is `GarbageFirst` for G1 but
+absent entirely for ZGC.
+
+Other things worth knowing about the file: it is mode 0600 and owned by the JVM's
+user, so the directory is globbed rather than assumed (`hsperfdata_*`), which also
+lets a root-run panel read another user's server. HotSpot hardcodes `/tmp` on Linux
+and ignores `TMPDIR`; `$TMPDIR` is checked too only because macOS puts it there.
+`-XX:+PerfDisableSharedMem` (common in containers) or `-XX:-UsePerfData` removes the
+file altogether, which is the "no counter file" message.
+
+### Host peaks, the refresh rate, and Reset Peaks
+
+The host bars carry the same notch, fed by `peak` fields that `/api/system/stats` now
+returns inside each block, in that block's own unit — load average for `cpu`, bytes
+used for `ram` and `disk`. They are marked but not labelled, so the row stays as
+narrow as it was; the number is in the notch's tooltip. Because the peak is folded in
+by `_record_peak()` as a side effect of *serving* the stats, the mods and worlds pages
+contribute samples too — they call the same endpoint for their disk line.
+
+The Overview's auto-refresh reads `[every] [15] s` beside its Refresh button, where
+the word "every" is itself the on/off button — clicking it says `off` and stops the
+timer. Both halves persist in `localStorage`: `vibepanel.overviewRefreshSecs` (default
+15 s) and `vibepanel.overviewRefreshOn`. `refreshSecs()` clamps to 1…3600 on read
+*and* writes the clamped value back, so a stale or hand-edited key can't outlive the
+check. Clamping, not rejecting: the value only drives a repeating fetch, and the
+failure mode worth preventing is a sub-second interval hammering the panel. It commits
+on `change`, not `input` — restarting the timer per keystroke would drop to 1 s the
+moment someone types the "1" of "120". `refreshOn()` treats anything that isn't
+literally `'off'` as on, so a missing or garbled key leaves refreshing working rather
+than stranding someone on a stale page they think is live.
+
+`overviewRestartTimer()` is the only place a timer is created, and it clears before it
+schedules, so it serves both directions of the toggle and every rate change without
+leaking an interval. Off leaves `overviewPollTimer` null — the same state as being on
+another page, which is why the toggle handler tests `activePage` rather than the timer
+to decide whether to act. Off stops the *repeating* fetch only: arriving on the page
+still loads once, and the manual Refresh button is untouched. Both still sample peaks,
+since that is a side effect of the endpoints themselves.
+
+`POST /api/peaks/reset` forgets everything at once: `HEAP_PEAKS` and `SYSTEM_PEAKS`
+both. It is global rather than per-session because the button lives on the Overview,
+the one page showing all of them together. Nothing is pushed to the client in reply —
+peaks are re-seeded from the next sample, so the button just calls `loadOverview()`.
+
 ## Directory layout (relative to game dir)
 
 ```
@@ -165,7 +443,14 @@ Bedrock player types in.
   ops.json             #   "
   banned-players.json  #   "
   get-me-fabric.sh     # auto-installed from repo root if missing
-  .vibepanel.json      # panel state: last-used jar per session (written on start/stop)
+  .vibepanel.json      # last-used jar + memory per session (written on start/stop)
+```
+
+And in the **panel's** own working directory, not the game dir:
+
+```
+<panel-dir>/
+  vibepanel-state.json  # expected sessions, their game dirs, autostart flags
 ```
 
 ## Multiple sessions share one DOM — two rules

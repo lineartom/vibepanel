@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 import os
 import re
+import glob
 import time
 import json
 import argparse
 import ipaddress
 import shlex
 import shutil
+import struct
 import subprocess
+import threading
 import urllib.request
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file, abort
@@ -225,6 +228,9 @@ def _pane_java_info(target: str = None) -> dict:
     that is plainly up. The jar name is dug out of the wrapper's own arguments
     when it's there (`su mc -c 'java … -jar server.jar'`), unknown when not.
 
+    `pid` is the java process itself, and is None in the wrapper case — the
+    wrapper's own pid is no use to anything that wants to talk to the JVM.
+
     Raises subprocess.CalledProcessError if the tmux target is unreachable.
     """
     t = target or TMUX_TARGET
@@ -233,7 +239,7 @@ def _pane_java_info(target: str = None) -> dict:
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     if not pane_tty:
-        return {"running": False, "jar": None}
+        return {"running": False, "jar": None, "pid": None}
 
     tty = pane_tty.removeprefix("/dev/")
     ps = subprocess.run(
@@ -256,14 +262,15 @@ def _pane_java_info(target: str = None) -> dict:
             continue
         base = os.path.basename(argv[0])
         if base == "java":
-            return {"running": True, "jar": jar_from(args)}
+            pid = int(parts[0]) if parts[0].isdigit() else None
+            return {"running": True, "jar": jar_from(args), "pid": pid}
         # Remember it, but keep looking: seeing java itself is always better.
         if wrapper is None and base in _PRIV_WRAPPERS and _wrapper_runs_a_command(argv):
             wrapper = args
 
     if wrapper:
-        return {"running": True, "jar": jar_from(wrapper)}
-    return {"running": False, "jar": None}
+        return {"running": True, "jar": jar_from(wrapper), "pid": None}
+    return {"running": False, "jar": None, "pid": None}
 
 
 def _is_running(target: str = None) -> bool:
@@ -286,13 +293,122 @@ def _load_state(gdir: str) -> dict:
         return {}
 
 
-def _remember_last_jar(gdir: str, session: str, jar: str) -> None:
-    """Persist the jar a session last ran, keyed by session name. Best-effort."""
-    if not jar:
+# ── The panel store ──────────────────────────────────────────────────────────
+#
+# Three words, used consistently from here on: a *server* is one game instance,
+# a *session* is the tmux session it lives in, and the *panel* is this process.
+#
+# There are two state files, split by who owns the facts:
+#
+#   this one, in the panel's own working directory
+#       which sessions we expect, where each one's game dir is, and whether it
+#       should be started when the panel starts. Panel configuration — and a
+#       session's directory could not live in the game dir anyway, since you
+#       need it to find the game dir in the first place.
+#
+#   .vibepanel.json, in each game dir (STATE_FILE above)
+#       last_jar / last_mem. Facts about that particular game, which travel
+#       with it if the directory is moved.
+#
+# Held in memory and flushed only when something actually changes: a status
+# poll observing nothing new must not rewrite the file every five seconds.
+
+# Resolved against the CWD at import — that is the panel's working directory
+# (systemd's WorkingDirectory=), and pinning it now means nothing later in this
+# process can move the store by chdir-ing. --state-file replaces it at startup.
+PANEL_STATE_FILE = os.path.abspath(
+    os.path.expanduser(os.environ.get("STATE_FILE", "vibepanel-state.json")))
+
+_PANEL_STATE = {"sessions": {}}
+_PANEL_LOCK = threading.Lock()
+_PANEL_STATE_WRITABLE = True
+
+
+def _load_panel_state() -> None:
+    """Read the store into memory. A missing or corrupt file starts empty."""
+    global _PANEL_STATE
+    try:
+        with open(PANEL_STATE_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    sessions = data.get("sessions")
+    _PANEL_STATE = {"sessions": sessions if isinstance(sessions, dict) else {}}
+
+
+def _write_panel_state_locked() -> None:
+    """Persist the store. Caller holds _PANEL_LOCK."""
+    global _PANEL_STATE_WRITABLE
+    path = PANEL_STATE_FILE
+    tmp  = path + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump(_PANEL_STATE, fh, indent=2)
+        os.replace(tmp, path)
+        _PANEL_STATE_WRITABLE = True
+    except OSError as e:
+        # Say it once, then carry on from memory. A panel that cannot persist
+        # is still a working panel; one that refuses to start is not.
+        if _PANEL_STATE_WRITABLE:
+            _PANEL_STATE_WRITABLE = False
+            print(f"cannot write {path}: {e}  (continuing without persistence)")
+
+
+def _session_state(session: str) -> dict:
+    """Everything the store knows about one session (a copy; never the live dict)."""
+    with _PANEL_LOCK:
+        return dict(_PANEL_STATE["sessions"].get(session, {}))
+
+
+def _update_session_state(session: str, **fields) -> bool:
+    """Fold fields into a session's entry, writing only if something changed.
+
+    Returns whether anything changed, so callers can log an actual transition
+    rather than every poll that re-observed the same thing.
+    """
+    with _PANEL_LOCK:
+        entry = _PANEL_STATE["sessions"].setdefault(session, {})
+        if all(entry.get(k) == v for k, v in fields.items()):
+            return False
+        entry.update(fields)
+        _write_panel_state_locked()
+        return True
+
+
+def _set_expected_sessions(names: list) -> None:
+    """Record the session set, dropping entries for sessions no longer expected.
+
+    Passing --session *declares* the set rather than adding to it, which is what
+    gives an admin a way to forget one: stop passing it. Everything we knew about
+    a dropped session goes with it — keeping a stale directory around to be
+    silently re-adopted later is worse than re-learning it.
+    """
+    with _PANEL_LOCK:
+        sessions = _PANEL_STATE["sessions"]
+        for gone in [s for s in sessions if s not in names]:
+            del sessions[gone]
+        for name in names:
+            sessions.setdefault(name, {})
+        _write_panel_state_locked()
+
+
+def _stored_sessions() -> list:
+    with _PANEL_LOCK:
+        return list(_PANEL_STATE["sessions"])
+
+
+def _remember_run(gdir: str, session: str, **fields) -> None:
+    """Persist how a session last ran (jar, memory), keyed by session name.
+
+    Best-effort: a game dir we cannot write to must not stop a server starting.
+    """
+    fields = {k: v for k, v in fields.items() if v}
+    if not fields:
         return
     try:
         state = _load_state(gdir)
-        state.setdefault("last_jar", {})[session] = jar
+        for key, value in fields.items():
+            state.setdefault(key, {})[session] = value
         path = os.path.join(gdir, STATE_FILE)
         tmp  = path + ".tmp"
         with open(tmp, "w") as fh:
@@ -304,6 +420,10 @@ def _remember_last_jar(gdir: str, session: str, jar: str) -> None:
 
 def _last_jar(gdir: str, session: str) -> str | None:
     return _load_state(gdir).get("last_jar", {}).get(session)
+
+
+def _last_mem(gdir: str, session: str) -> str | None:
+    return _load_state(gdir).get("last_mem", {}).get(session)
 
 
 def _resolve_tmux_target(target: str) -> str:
@@ -330,6 +450,200 @@ def _resolve_tmux_target(target: str) -> str:
         return sessions[0]
 
     return target
+
+
+# Sessions whose creation failed, so a tmux that cannot start at all doesn't
+# reprint the same error on every status poll. Cleared as soon as one exists.
+_AUTOSTART_FAILED = set()
+
+
+def _session_dir(target: str) -> str:
+    """Where a session's shell belongs, or '' if we have no idea.
+
+    The store's learned directory first — it is per session and, once confirmed,
+    was read off a server that was actually running there. SERVER_DIR is only a
+    fallback for a session we have never seen: it is a single global covering
+    every session, which is exactly the assumption the store exists to replace.
+    """
+    return _session_state(target.split(":")[0]).get("dir") or SERVER_DIR
+
+
+def _shell_is_ready(target: str) -> bool:
+    """Is the pane's shell up and reading, rather than mid-fork?
+
+    `new-session -d` returns as soon as tmux has the pane, which is before the
+    child has chdir'd and exec'd. A shell that owns its terminal is its own
+    foreground process group, so tpgid == pane_pid is exactly the "the shell is
+    there and idle" signal — the same /proc field tmux_pane_path() reads, used
+    for the thing it is genuinely good for. Anything unexpected reads as ready:
+    this gates a short wait, and waiting forever is worse than typing early.
+    """
+    try:
+        pane_pid = subprocess.run(
+            ["tmux", "display-message", "-t", target, "-p", "#{pane_pid}"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        with open(f"/proc/{pane_pid}/stat") as fh:
+            stat = fh.read()
+        return stat[stat.rindex(')') + 2:].split()[5] == pane_pid
+    except FileNotFoundError:
+        return True             # no /proc (macOS): nothing to wait on
+    except Exception:
+        return True
+
+
+def _wait_for_shell(target: str, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not _shell_is_ready(target) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def _ensure_session(target: str) -> str:
+    """Create a missing tmux session in its game directory.
+
+    Returns "exists" (it was already there), "created", or "failed" — not a
+    bool, because the difference between the first two decides how the caller
+    may resolve the game dir. On a session we just created it is the directory
+    we passed to -c, *by construction*; asking tmux_pane_path() to tell us back
+    would be both a round trip to rediscover what we just asserted and a race,
+    since new-session returns before the child has chdir'd and exec'd, and
+    /proc/<tpgid>/cwd inside that window is the *tmux server's* CWD. That is
+    not an error, so nothing raises — it is a plausible wrong path, which is
+    the worst kind.
+
+    A session is only ever created when we know where it belongs and that
+    directory exists. Without that we would be guessing, and a session opened
+    in the wrong place is worse than no session at all: every path the panel
+    resolves comes from the pane's CWD, so the panel would look healthy while
+    listing someone else's directory.
+
+    What gets created is a plain shell, never a server. `new-session -c` puts
+    that shell in the right directory to begin with, so the pane reports the
+    game dir immediately and Start has somewhere to type.
+    """
+    session = target.split(":")[0]
+    try:
+        if subprocess.run(["tmux", "has-session", "-t", session],
+                          capture_output=True).returncode == 0:
+            _AUTOSTART_FAILED.discard(session)
+            return "exists"
+
+        gdir = _session_dir(target)
+        if not gdir or not os.path.isdir(gdir):
+            return "failed"
+
+        r = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session, "-c", gdir],
+            capture_output=True, text=True,
+        )
+    except OSError as e:            # no tmux on PATH
+        err = str(e)
+    else:
+        if r.returncode == 0:
+            _AUTOSTART_FAILED.discard(session)
+            print(f"created tmux session '{session}' in {gdir}")
+            _wait_for_shell(target)
+            return "created"
+        err = r.stderr.strip() or f"tmux exited {r.returncode}"
+
+    if session not in _AUTOSTART_FAILED:
+        _AUTOSTART_FAILED.add(session)
+        print(f"could not create tmux session '{session}': {err}")
+    return "failed"
+
+
+def _game_dir(target: str, ensured: str = None) -> str:
+    """The game directory for a session.
+
+    Pass `ensured` — the _ensure_session() result — when a session may have just
+    been created: that case answers from the directory we created it with rather
+    than probing a pane whose shell may not have exec'd yet. Otherwise this is
+    the ordinary rule, the CWD of the pane's foreground process, which follows an
+    admin who has cd'd somewhere and is what every other game-dir read uses.
+    """
+    if ensured == "created":
+        return _session_dir(target)
+    return tmux_pane_path(target)
+
+
+# Last running state we saw per session, so _observe_session() can spot the
+# stopped → running edge. Empty at startup, which makes the first sighting of a
+# running server an edge — exactly when we most want to learn where it lives.
+_LAST_RUNNING = {}
+
+
+def _running_game_dir(target: str, pid: int) -> str | None:
+    """The CWD of a running server: the one directory we can be sure of.
+
+    /proc/<pid>/cwd is the java process itself, which beats the pane's
+    foreground process for the `bash start.sh` case — there the foreground group
+    leader is the wrapper script, not the server. Falls back to the pane when
+    that read is not available: another user's process under hidepid, or no /proc
+    at all.
+    """
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        pass
+    try:
+        return tmux_pane_path(target) or None
+    except Exception:
+        return None
+
+
+def _observe_session(target: str, info: dict, ensured: str = None) -> None:
+    """Learn where a session's game directory is, by watching it.
+
+    tmux_pane_path() reports the CWD of the pane's *foreground* process, and how
+    much that is worth depends entirely on what is in the foreground:
+
+      server stopped   it is the admin's shell, which may be anywhere. A guess —
+                       good enough to use until something better comes along.
+      server running   it is the server, so its CWD *is* the game dir. A fact.
+
+    So a directory learned from a running server is marked confirmed and is only
+    ever replaced by another confirmed sighting. An admin who cd's out of the
+    game dir with the server down is not evidence against something we watched
+    java do, and must not be allowed to un-learn it.
+
+    Deliberately not folded into _pane_java_info(), which stays a pure query;
+    this is an explicit side effect of *serving status*, the same shape as
+    _record_peak().
+
+    Never raises: a panel that 500s because it could not take a note would be a
+    poor trade.
+    """
+    session = target.split(":")[0]
+    running = bool(info.get("running"))
+    was     = _LAST_RUNNING.get(session)
+    _LAST_RUNNING[session] = running
+
+    try:
+        if running:
+            # Only on the edge: re-reading /proc every poll buys nothing, since a
+            # process cannot change its own CWD out from under itself here.
+            if was is True:
+                return
+            pid = info.get("pid")
+            # No pid means su/sudo: java is off our tty entirely and the pane's
+            # foreground process is the privilege wrapper, whose CWD is wherever
+            # the admin's shell happened to be. Recording that would poison the
+            # store with a confident-looking wrong path.
+            if pid is None:
+                return
+            gdir = _running_game_dir(target, pid)
+            if gdir and _update_session_state(session, dir=gdir, dir_confirmed=True):
+                print(f"session '{session}': game dir is {gdir} (seen running)")
+            return
+
+        # Stopped. Track the pane while the directory is still only a guess.
+        if _session_state(session).get("dir_confirmed"):
+            return
+        gdir = _game_dir(target, ensured)
+        if gdir:
+            _update_session_state(session, dir=gdir, dir_confirmed=False)
+    except Exception:
+        pass
 
 
 def _session_target() -> str:
@@ -940,15 +1254,229 @@ def api_server_status():
     `ok` distinguishes "the server is stopped" from "we can't see the pane at all" —
     both report running=False, and conflating them makes an unreachable session look
     like an idle one.
+
+    This is also where a missing session gets put back. Every page is 503 until
+    one exists, and this endpoint is what each of them polls, so it is the first
+    thing to notice — on startup before anyone has made the session, and later if
+    something kills it. The recreate hangs off the failure path rather than a
+    has-session check up front, so a session that is present costs nothing extra.
+
+    It is likewise where the panel learns each session's game directory: every
+    page polls it, for every session, so it sees the stopped → running edge that
+    _observe_session() needs.
     """
     target = _session_target()
     try:
-        return jsonify({**_pane_java_info(target), "ok": True})
+        info = _pane_java_info(target)
+        _observe_session(target, info)
+        return jsonify({**info, "ok": True})
     except subprocess.CalledProcessError:
+        ensured = _ensure_session(target)
+        if ensured != "failed":
+            try:
+                info = _pane_java_info(target)
+                _observe_session(target, info, ensured)
+                return jsonify({**info, "ok": True})
+            except subprocess.CalledProcessError:
+                pass    # a target naming a window/pane we did not create
         return jsonify({"running": False, "ok": False,
                         "error": f"tmux target '{target}' not found"})
     except Exception as e:
         return jsonify({"running": False, "ok": False, "error": str(e)})
+
+
+# ── Heap usage (prototype) ───────────────────────────────────────────────────
+#
+# Read straight out of the JVM's own performance-counter file rather than by
+# asking the JVM anything. Every HotSpot JVM mmaps one at
+# /tmp/hsperfdata_<user>/<pid> and keeps it current as a matter of course; it is
+# what jstat reads. Measured against an idle JVM, 50 samples:
+#
+#     jcmd GC.heap_info   3.07 s wall, 4.69 s CPU   (0.01 s of it in the server)
+#     reading this file   0.02 s wall, 0.02 s CPU   (0.00 s of it in the server)
+#
+# jcmd is not expensive because the JVM works hard for it — the diagnostic costs
+# the server ~0.2 ms. It is expensive because jcmd is itself a Java program, so
+# each sample booted a second JVM just to speak the attach protocol. Reading the
+# file costs a 32 KB read, needs no JDK installed, and touches the server not at
+# all. There is deliberately no fallback to jcmd: see the note on `used` below.
+
+# Highest `used` seen per session, keyed by pid so a restart starts a fresh
+# peak: {session: {"pid": int, "peak": bytes}}. Deliberately in memory only —
+# "since the server was last started" is a fact about the current JVM, and this
+# is sampled solely by the Overview page's existing refresh, never polled.
+HEAP_PEAKS = {}
+
+_PERF_MAGIC = 0xCAFEC0C0
+
+# The counters we want, matched whole so that e.g. the per-age breakdown in
+# sun.gc.generation.0.agetable.* can never be mistaken for a space.
+_GEN_USED_RE  = re.compile(r"sun\.gc\.generation\.\d+\.space\.\d+\.used")
+_GEN_CAP_RE   = re.compile(r"sun\.gc\.generation\.\d+\.capacity")
+_GEN_MAX_RE   = re.compile(r"sun\.gc\.generation\.\d+\.maxCapacity")
+_GC_INVOC_RE  = re.compile(r"sun\.gc\.collector\.\d+\.invocations")
+
+
+def _hsperf_path(pid: int) -> str | None:
+    """Locate a JVM's performance-counter file, or None if it has none.
+
+    HotSpot hardcodes /tmp for this on Linux — it ignores TMPDIR — so /tmp is
+    what matters in deployment; $TMPDIR is checked as well only because macOS
+    puts it there and the panel gets developed on one. The directory is named
+    for the *JVM's* user rather than ours, so it is globbed, not assumed: that
+    also lets a panel running as root read a server running as someone else.
+    """
+    roots = ["/tmp"]
+    tmp = os.environ.get("TMPDIR")
+    if tmp:
+        roots.append(tmp)
+    for root in roots:
+        for path in glob.glob(os.path.join(root, "hsperfdata_*", str(pid))):
+            return path
+    return None
+
+
+def _read_perf_counters(path: str) -> dict:
+    """Parse an hsperfdata file into {counter name: value}.
+
+    The format is a documented binary that has been at version 2.0 since Java 5:
+    a 32-byte prologue, then `num_entries` variable-length entries, each holding
+    its own name and value at offsets relative to the entry. Only the long
+    counters are kept — every figure we want is one, and skipping the strings
+    means never having to think about their encoding.
+
+    The file is live and memory-mapped, so a sample can in principle mix values
+    written a few microseconds apart. Individual counters are aligned 64-bit
+    words and can't tear; a gauge does not care about the rest.
+    """
+    with open(path, "rb") as fh:
+        buf = fh.read()
+    if len(buf) < 32 or struct.unpack_from(">I", buf, 0)[0] != _PERF_MAGIC:
+        raise ValueError("not an hsperfdata file")
+    byte_order, major, _minor, accessible = buf[4:8]
+    if major != 2:
+        raise ValueError(f"unsupported hsperfdata version {major}")
+    if not accessible:
+        # Set once the JVM has finished initialising its counters.
+        raise ValueError("counters not ready yet")
+
+    e = "<" if byte_order else ">"
+    entry_offset, num_entries = struct.unpack_from(e + "ii", buf, 24)
+
+    counters = {}
+    off = entry_offset
+    for _ in range(num_entries):
+        if off + 20 > len(buf):
+            break
+        length, name_offset, vector_length = struct.unpack_from(e + "iii", buf, off)
+        if length <= 0 or off + length > len(buf):
+            break
+        data_type = buf[off + 12]
+        data_offset = struct.unpack_from(e + "i", buf, off + 16)[0]
+        if vector_length == 0 and data_type == ord("J"):
+            name = buf[off + name_offset:off + length].split(b"\0", 1)[0]
+            counters[name.decode("utf-8", "replace")] = \
+                struct.unpack_from(e + "q", buf, off + data_offset)[0]
+        off += length
+    return counters
+
+
+def _heap_from_counters(c: dict) -> dict | None:
+    """Fold the gc counters into {used, committed, reserved, collections} bytes."""
+    used      = sum(v for k, v in c.items() if _GEN_USED_RE.fullmatch(k))
+    committed = sum(v for k, v in c.items() if _GEN_CAP_RE.fullmatch(k))
+    maxes     = [v for k, v in c.items() if _GEN_MAX_RE.fullmatch(k)]
+    if not maxes:
+        return None
+
+    # No counter states the whole heap's maximum, so it is derived. G1 and ZGC
+    # hand every generation the same region pool, so each reports the entire
+    # heap as its own max (1024M + 1024M for -Xmx1g); Parallel and Serial split
+    # a fixed budget between young and old (341M + 683M), which must be summed.
+    reserved = maxes[0] if len(set(maxes)) == 1 else sum(maxes)
+    # A heap cannot be committed beyond its reservation. If it reads that way,
+    # the generations only *happened* to share a maximum — Parallel with -Xmn at
+    # exactly half of -Xmx — and the real budget is the sum after all.
+    if committed > reserved:
+        reserved = sum(maxes)
+
+    return {"used": used, "committed": committed, "reserved": reserved,
+            "collections": sum(v for k, v in c.items() if _GC_INVOC_RE.fullmatch(k))}
+
+
+def _read_heap(pid: int) -> tuple[dict | None, str | None]:
+    """Heap figures for a JVM from its counter file; (heap, error message).
+
+    `used` is the live set as of the last collection, not occupancy at this
+    instant: HotSpot refreshes these counters at GC boundaries. That is a real
+    difference from what jcmd reports — mid-cycle, a churning Parallel heap held
+    a steady 161 MB here while jcmd swung between 281 MB and 501 MB as eden
+    filled and emptied — but it is the more useful of the two figures, and the
+    only one worth a peak marker. Instantaneous occupancy on a healthy server
+    spends much of its time near the maximum by design, so a peak taken from it
+    saturates within minutes and stops saying anything.
+    """
+    path = _hsperf_path(pid)
+    if not path:
+        return None, ("no counter file for this JVM — started with "
+                      "-XX:+PerfDisableSharedMem or -XX:-UsePerfData?")
+    try:
+        counters = _read_perf_counters(path)
+    except PermissionError:
+        return None, "counter file is not readable — the server runs as another user"
+    except (OSError, ValueError, struct.error) as e:
+        return None, f"unreadable counter file: {e}"
+
+    heap = _heap_from_counters(counters)
+    if not heap:
+        return None, "no heap counters in this JVM's counter file"
+    if not heap["collections"]:
+        # Before the first collection the live-set counters are all still zero,
+        # which would render as a heap using nothing at all.
+        return None, "waiting for the first GC to publish a live-set figure"
+    return heap, None
+
+
+@app.route("/api/server/heap")
+def api_server_heap():
+    """Heap utilisation of the JVM in our pane, from its hsperfdata counters.
+
+    Sampled by the Overview page only, and `peak` is recorded here on each
+    sample: "highest seen" means highest at the moments we happened to look.
+
+    Every way of failing answers with `ok: false` and a sentence saying which,
+    because there is no second mechanism to fall back to — a server whose
+    counters we cannot read simply has no heap bar, and the reason is shown.
+    """
+    target  = _session_target()
+    session = target.split(":")[0]
+    try:
+        info = _pane_java_info(target)
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+    if not info["running"]:
+        HEAP_PEAKS.pop(session, None)
+        return jsonify({"ok": False, "running": False, "error": "server not running"})
+
+    pid = info.get("pid")
+    if not pid:
+        # A privilege wrapper hides the JVM from us entirely — see _pane_java_info.
+        return jsonify({"ok": False, "running": True,
+                        "error": "java process not visible (started via su/sudo)"})
+
+    heap, err = _read_heap(pid)
+    if not heap:
+        return jsonify({"ok": False, "running": True, "pid": pid, "error": err})
+
+    rec = HEAP_PEAKS.get(session)
+    if not rec or rec["pid"] != pid:
+        rec = HEAP_PEAKS[session] = {"pid": pid, "peak": 0}
+    rec["peak"] = max(rec["peak"], heap["used"])
+
+    return jsonify({"ok": True, "running": True, "pid": pid, "peak": rec["peak"], **heap})
 
 
 def _list_jars(gdir: str) -> list:
@@ -978,10 +1506,80 @@ def api_server_jars():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
     try:
         os.makedirs(os.path.join(gdir, JARS_DIR), exist_ok=True)
+        session = target.split(":")[0]
         return jsonify({"ok": True, "jars": _list_jars(gdir), "jars_dir": JARS_DIR,
-                        "last_jar": _last_jar(gdir, target.split(":")[0])})
+                        "last_jar": _last_jar(gdir, session),
+                        "last_mem": _last_mem(gdir, session)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+class StartError(ValueError):
+    """A start that was refused, carrying the status the endpoint should return."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def _start_server(target: str, gdir: str, jar: str, mem: str) -> str:
+    """Type a java command into the session's pane. Returns the jar it launched.
+
+    The single start path: the Start button and the autostart pass both come
+    through here, so what happens at boot is exactly what happens on a click.
+    Raises StartError for anything refused.
+    """
+    mem = str(mem or "").strip().upper()
+    if not jar:
+        raise StartError("No jar selected")
+    # fullmatch, not match: Python's `$` also matches just before a trailing
+    # newline, so `^\d+[MG]$` accepts "1024M\n". The .strip() above removes it
+    # today, but a newline reaching send-keys would be typed as Enter — ending
+    # the java line and running whatever came after it. Don't leave that hanging
+    # on a .strip() staying put.
+    if not re.fullmatch(r'\d+[MG]', mem):
+        raise StartError("Invalid memory value — use e.g. 1024M or 2G")
+
+    # The caller *selects* a jar; it never contributes to the path we build.
+    # Enumerate what is actually in the jars dir and require an exact match, then
+    # use the entry we listed. No pattern-matching on the client's string can be
+    # as trustworthy as "this is one of the files we just read off disk", and it
+    # is the same list the UI offered, so anything else is a stale or forged pick.
+    selected = next((f for f in _list_jars(gdir) if f == jar), None)
+    if selected is None:
+        raise StartError(f"No such jar in {JARS_DIR}: {jar}", 404)
+    jar_path = os.path.join(gdir, JARS_DIR, selected)
+
+    if _is_running(target):
+        raise StartError("Server is already running", 409)
+
+    # Unlike the console commands, this line is *meant* for a shell. gdir comes
+    # from the pane's CWD or the store, never from us, so quote it — which also
+    # makes paths containing spaces work, as they previously did not.
+    #
+    # The `cd` goes to gdir, the same directory the jar was just listed from, so
+    # the server's CWD and its jar can never disagree. It used to go to
+    # SERVER_DIR instead, which only lined up when the pane already happened to
+    # be there: with the pane elsewhere it ran a jar from one game dir with the
+    # working directory of another. Where the pane is already gdir this is a
+    # no-op, and a harmless one — it also closes the gap between reading the
+    # pane's path and typing the line.
+    cmd = (f"cd {shlex.quote(gdir)} && "
+           f"java -Xmx{mem} -Xms{mem} -jar {shlex.quote(jar_path)} nogui")
+
+    # This used to create the session with `cmd` as its process when one was
+    # missing, which tied the session's life to the server's: stopping the
+    # server took the pane with it, and the panel reads that pane afterwards.
+    # It was also unreachable — resolving gdir above already requires a pane.
+    # _ensure_session only covers the gap between those two, where something
+    # killed the session while this request was in flight.
+    _ensure_session(target)
+    tmux_send(cmd, target)
+    # Remember on start, not just on stop, so stops that happen outside the
+    # panel (console 'stop', a crash) still leave a sensible default behind —
+    # and so autostart knows what to launch and with how much.
+    _remember_run(gdir, target.split(":")[0], last_jar=selected, last_mem=mem)
+    return selected
 
 
 @app.route("/api/server/start", methods=["POST"])
@@ -989,65 +1587,106 @@ def api_server_start():
     """Send the java start command to the tmux session."""
     target = _session_target()
     data   = request.get_json(force=True, silent=True) or {}
-    jar    = str(data.get("jar", "")).strip()
-    mem    = str(data.get("mem", "1024M")).strip().upper()
-
-    if not jar:
-        return jsonify({"ok": False, "error": "No jar selected"}), 400
-    # fullmatch, not match: Python's `$` also matches just before a trailing
-    # newline, so `^\d+[MG]$` accepts "1024M\n". The .strip() above removes it
-    # today, but a newline reaching send-keys would be typed as Enter — ending
-    # the java line and running whatever came after it. Don't leave that hanging
-    # on a .strip() staying put.
-    if not re.fullmatch(r'\d+[MG]', mem):
-        return jsonify({"ok": False, "error": "Invalid memory value — use e.g. 1024M or 2G"}), 400
 
     try:
         gdir = tmux_pane_path(target)
     except subprocess.CalledProcessError:
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
-    # The request *selects* a jar; it never contributes to the path we build.
-    # Enumerate what is actually in the jars dir and require an exact match, then
-    # use the entry we listed. No pattern-matching on the client's string can be
-    # as trustworthy as "this is one of the files we just read off disk", and it
-    # is the same list the UI offered, so anything else is a stale or forged pick.
-    available = _list_jars(gdir)
-    selected  = next((f for f in available if f == jar), None)
-    if selected is None:
-        return jsonify({"ok": False,
-                        "error": f"No such jar in {JARS_DIR}: {jar}"}), 404
-    jar_path = os.path.join(gdir, JARS_DIR, selected)
-
-    if _is_running(target):
-        return jsonify({"ok": False, "error": "Server is already running"}), 409
-
-    # Unlike the console commands, this line is *meant* for a shell. jar_path is
-    # built from the pane's CWD and JARS_DIR, and SERVER_DIR comes from config —
-    # none of which we control, so quote them. Also makes paths containing spaces
-    # work, which they previously did not.
-    cmd = f"java -Xmx{mem} -Xms{mem} -jar {shlex.quote(jar_path)} nogui"
-    if SERVER_DIR:
-        cmd = f"cd {shlex.quote(SERVER_DIR)} && {cmd}"
-
     try:
-        session = target.split(":")[0]
-        has = subprocess.run(["tmux", "has-session", "-t", session], capture_output=True)
-        if has.returncode == 0:
-            tmux_send(cmd, target)
-        else:
-            subprocess.run(
-                ["tmux", "new-session", "-d", "-s", session, cmd],
-                check=True, capture_output=True,
-            )
-        # Also remember on start, so stops that happen outside the panel
-        # (console 'stop', crash) still leave a sensible default behind.
-        _remember_last_jar(gdir, session, selected)
+        _start_server(target, gdir,
+                      str(data.get("jar", "")).strip(),
+                      str(data.get("mem", "1024M")))
         return jsonify({"ok": True})
+    except StartError as e:
+        return jsonify({"ok": False, "error": str(e)}), e.status
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": str(e)}), 503
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _autostart_plan(session: str) -> dict:
+    """What autostart would do for a session, and what it knows.
+
+    The chain is panel store → dir → the game dir's .vibepanel.json → jar+mem, so
+    a broken link is reported as itself rather than as a blank field: "we have
+    never seen this session" and "its disk did not come back after the reboot"
+    are different problems with different fixes.
+    """
+    st   = _session_state(session)
+    plan = {"autostart": bool(st.get("autostart")),
+            "dir": st.get("dir"), "dir_confirmed": bool(st.get("dir_confirmed")),
+            "jar": None, "mem": None, "problem": None}
+
+    if not plan["dir"]:
+        plan["problem"] = "no game directory known for this session yet"
+        return plan
+    if not os.path.isdir(plan["dir"]):
+        plan["problem"] = f"game directory is not readable: {plan['dir']}"
+        return plan
+
+    plan["jar"] = _last_jar(plan["dir"], session)
+    plan["mem"] = _last_mem(plan["dir"], session) or "1024M"
+    if not plan["jar"]:
+        plan["problem"] = "no jar remembered — start this server from the panel once"
+    return plan
+
+
+def _autostart_pass() -> None:
+    """Start every session whose checkbox is ticked. Called once, at startup.
+
+    The checkbox is the only trigger: nothing here consults whether the server
+    was running before, why the panel started, or how long the machine has been
+    up. Ticked means it starts whenever the panel process starts; unticked means
+    nothing ever happens. An admin who ticked it owns the consequence, and one
+    who did not is never surprised.
+
+    Every outcome prints. Somebody who finds a server running must be able to see
+    in the panel's own log that the panel did it, and why.
+
+    Sessions are independent — one failing must not stop the others.
+    """
+    for target in SESSIONS:
+        session = target.split(":")[0]
+        plan = _autostart_plan(session)
+        if not plan["autostart"]:
+            continue
+        try:
+            # Not a policy check: `systemctl restart vibepanel` on a healthy host
+            # must not type a second JVM into a running server's pane.
+            if _is_running(target):
+                print(f"autostart: '{session}' is already running — left alone")
+                continue
+            if plan["problem"]:
+                print(f"autostart: '{session}' skipped — {plan['problem']}")
+                continue
+            _start_server(target, plan["dir"], plan["jar"], plan["mem"])
+            print(f"autostart: '{session}' starting {plan['jar']} "
+                  f"with {plan['mem']} in {plan['dir']}")
+        except Exception as e:
+            print(f"autostart: '{session}' failed — {e}")
+
+
+@app.route("/api/server/autostart")
+def api_server_autostart_get():
+    return jsonify({"ok": True, **_autostart_plan(_session_target().split(":")[0])})
+
+
+@app.route("/api/server/autostart", methods=["POST"])
+def api_server_autostart_set():
+    """Turn the per-server 'start when the panel starts' flag on or off.
+
+    Lives in the panel store rather than the game dir, so reading it never
+    depends on resolving a directory first — which is exactly the condition
+    autostart runs under, before any session is guaranteed to exist.
+    """
+    session = _session_target().split(":")[0]
+    data = request.get_json(force=True, silent=True) or {}
+    if not isinstance(data.get("autostart"), bool):
+        return jsonify({"ok": False, "error": "autostart must be true or false"}), 400
+    _update_session_state(session, autostart=data["autostart"])
+    return jsonify({"ok": True, **_autostart_plan(session)})
 
 
 @app.route("/api/server/stop", methods=["POST"])
@@ -1060,7 +1699,7 @@ def api_server_stop():
     # next time. Best-effort: never block the stop.
     try:
         jar = _pane_java_info(target).get("jar")
-        _remember_last_jar(tmux_pane_path(target), target.split(":")[0], jar)
+        _remember_run(tmux_pane_path(target), target.split(":")[0], last_jar=jar)
     except Exception:
         pass
     try:
@@ -1551,9 +2190,30 @@ def _get_ram_stats() -> dict | None:
         return None
 
 
+# Highest host figures seen, on the same terms as HEAP_PEAKS: sampled only when
+# something asks for stats, never on a timer of the panel's own.
+SYSTEM_PEAKS = {"cpu": None, "ram": None, "disk": None}
+
+
+def _record_peak(key: str, value) -> float | int | None:
+    """Fold `value` into SYSTEM_PEAKS[key] and hand back the running peak."""
+    if value is None:
+        return SYSTEM_PEAKS[key]
+    cur = SYSTEM_PEAKS[key]
+    if cur is None or value > cur:
+        SYSTEM_PEAKS[key] = value
+    return SYSTEM_PEAKS[key]
+
+
 @app.route("/api/system/stats")
 def api_system_stats():
-    """Host-level CPU, RAM, and disk stats (no session param needed)."""
+    """Host-level CPU, RAM, and disk stats (no session param needed).
+
+    Each block carries a `peak`, in that block's own unit — load average for
+    cpu, bytes used for ram and disk — so the bars can mark the high-water
+    point next to the current one. Peaks live in memory and are reset together
+    with the per-server heap peaks by /api/peaks/reset.
+    """
     try:
         load1, load5, load15 = os.getloadavg()
     except OSError:
@@ -1568,13 +2228,28 @@ def api_system_stats():
     except OSError:
         disk = None
 
-    return jsonify({
-        "ok": True,
-        "cpu":  {"load_1m": round(load1, 2), "load_5m": round(load5, 2),
-                 "load_15m": round(load15, 2), "cores": cores},
-        "ram":  ram,
-        "disk": disk,
-    })
+    cpu = {"load_1m": round(load1, 2), "load_5m": round(load5, 2),
+           "load_15m": round(load15, 2), "cores": cores}
+    cpu["peak"] = _record_peak("cpu", cpu["load_1m"])
+    if ram:
+        ram = {**ram, "peak": _record_peak("ram", ram.get("used"))}
+    if disk:
+        disk = {**disk, "peak": _record_peak("disk", disk.get("used"))}
+
+    return jsonify({"ok": True, "cpu": cpu, "ram": ram, "disk": disk})
+
+
+@app.route("/api/peaks/reset", methods=["POST"])
+def api_peaks_reset():
+    """Forget every recorded peak: host stats and all sessions' heaps.
+
+    Deliberately global rather than per-session — the button is on the Overview,
+    which is the page that shows all of them at once.
+    """
+    HEAP_PEAKS.clear()
+    for k in SYSTEM_PEAKS:
+        SYSTEM_PEAKS[k] = None
+    return jsonify({"ok": True})
 
 
 @app.route("/api/console/stream")
@@ -1617,7 +2292,10 @@ if __name__ == "__main__":
     parser.add_argument("--jars-dir", default=None,
                         help="path to server-jars directory (default: ./server-jars)")
     parser.add_argument("--server-dir", default=None,
-                        help="working directory to cd into before starting the server")
+                        help="fallback game directory for a session the panel has "
+                             "never seen; normally learned and remembered instead")
+    parser.add_argument("--state-file", default=None,
+                        help=f"panel state file (default: ./{PANEL_STATE_FILE and os.path.basename(PANEL_STATE_FILE)})")
     parser.add_argument("--worlds-dir", default=None,
                         help="path to world-saves directory (default: ./world-saves)")
     parser.add_argument("--mods-dir", default=None,
@@ -1637,12 +2315,25 @@ if __name__ == "__main__":
     if args.mods_saves_dir:
         MODS_SAVES_DIR = args.mods_saves_dir
 
-    raw_sessions = args.sessions or [TMUX_TARGET]
-    if len(raw_sessions) == 1:
+    if args.state_file:
+        PANEL_STATE_FILE = os.path.abspath(os.path.expanduser(args.state_file))
+    _load_panel_state()
+
+    # --session *declares* the expected set. Passing it says "these are the
+    # servers", replacing whatever was stored, which is what gives an admin a way
+    # to forget one: stop passing it. Passing nothing reuses the last declared
+    # set, so the usual invocation after the first is just `server.py`.
+    raw_sessions = args.sessions or _stored_sessions() or [TMUX_TARGET]
+    if len(raw_sessions) == 1 and not _session_state(raw_sessions[0].split(":")[0]).get("dir"):
+        # Adoption is the fallback for not knowing what to do. Once the store
+        # knows where this session lives we can recreate it ourselves, and
+        # silently repointing at whichever session happens to be up would drop
+        # what we learned and manage the wrong server.
         SESSIONS = [_resolve_tmux_target(raw_sessions[0])]
     else:
         SESSIONS = list(raw_sessions)
     TMUX_TARGET = SESSIONS[0]
+    _set_expected_sessions([s.split(":")[0] for s in SESSIONS])
 
     PUBLIC_IP = _fetch_public_ip()
     if PUBLIC_IP:
@@ -1653,6 +2344,22 @@ if __name__ == "__main__":
         # failed `cd` to surface as a mysteriously-not-starting server later.
         print(f"Server dir: {SERVER_DIR}"
               + ("" if os.path.isdir(SERVER_DIR) else "  (does not exist yet)"))
+
+    # Open any session that isn't there yet — after adoption has had its say, so
+    # we never create 'minecraft' next to the 'mc' we were about to adopt — then
+    # look at each one, which is what teaches the store where a server lives.
+    for s in SESSIONS:
+        ensured = _ensure_session(s)
+        try:
+            _observe_session(s, _pane_java_info(s), ensured)
+        except Exception:
+            pass
+        st = _session_state(s.split(":")[0])
+        if st.get("dir"):
+            print(f"session '{s.split(':')[0]}': {st['dir']}"
+                  + ("" if st.get("dir_confirmed") else "  (unconfirmed)"))
+
+    _autostart_pass()
 
     session_display = ', '.join(SESSIONS)
     print(f"VibePanel starting on http://{args.host}:{args.port}  "

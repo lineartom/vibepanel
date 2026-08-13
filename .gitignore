@@ -6,3 +6,4 @@ __pycache__/
 vibepanel-*.tar.gz
 transcripts
 VERSION
+vibepanel-state.json
