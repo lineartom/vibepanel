@@ -103,15 +103,21 @@ Two things the edge handling gets right on purpose:
   `bash start.sh` case, where the foreground group leader is the wrapper script.
   Falls back to `tmux_pane_path()` when that read isn't available (`hidepid`,
   another user, no `/proc`).
-- **Never learn from the su/sudo case.** There `pid` is `None`, java is off our tty
-  entirely, and the pane's foreground process is the privilege wrapper — whose CWD
-  is wherever the admin's shell was. Recording it would poison the store with a
-  confident-looking wrong path.
+- **Never learn from the pane in the su/sudo case.** The pane's foreground process
+  there is the privilege wrapper, whose CWD is wherever the admin's shell was, and
+  recording it would poison the store with a confident-looking wrong path. That
+  used to be expressed as "`pid` is `None`, so return"; now that `_java_under()`
+  finds the JVM through `/proc`, `pid` often isn't, so the rule is carried by
+  `wrapped` instead — `_running_game_dir(..., allow_pane=False)`. A wrapped server
+  either gives up its own `cwd` (a root panel can read it) or teaches us nothing.
+  Reading its **command line** is a separate question, and that we do — see the
+  su/sudo section.
 
-Only the *edge* triggers a read; a server cannot change its own CWD, so re-reading
-`/proc` on every poll would buy nothing. This is deliberately **not** folded into
-`_pane_java_info()`, which stays a pure query — it is a side effect of *serving
-status*, the same shape as `_record_peak()`.
+Only the *edge* triggers a read; a server cannot change its own CWD, nor rewrite
+the command line it was started with, so re-reading `/proc` on every poll would
+buy nothing. This is deliberately **not** folded into `_pane_java_info()`, which
+stays a pure query — it is a side effect of *serving status*, the same shape as
+`_record_peak()`.
 
 ### Creating a missing session
 
@@ -166,6 +172,52 @@ supply `gdir` differently, and the difference is the point:
   a session, not for overriding a live one.
 - **autostart** passes the stored `dir`, because there is no admin at a pane to
   follow.
+
+### What the panel remembers about the last run
+
+`_start_server()` records the whole form on the way out — mode, and then either
+jar + `last_mem` or script — so a stop that happens *outside* the panel (console
+`stop`, a crash) still leaves a usable default, and autostart knows what to
+launch and with how much.
+
+The other two writers read the same pair off the **running process** instead,
+via `_java_jar()` / `_java_mem()` on its argv, and exist for the server the panel
+did not start — typed at the pane by hand, or brought up by something else
+entirely. There the process is the only account of what was chosen:
+
+- **`_observe_session()`, on the stopped → running edge.** The moment the panel
+  can see what is running is the moment to write it down; waiting for the stop
+  would lose it to a crash, and `/api/server/status` carries `jar` and `mem` so
+  the page can show them while it runs.
+- **`/api/server/stop`**, which re-reads immediately before sending `stop`.
+
+Both go through `_remember_run()`, which drops whichever field it could not read,
+so an unparseable command line leaves the previous value standing rather than
+blanking it. The edge writer additionally refuses to write into a directory it
+only *guessed* (`_confirmed_dir()`): recording one game's habits into what may be
+another game's directory is worse than not recording them.
+
+`_java_mem()` returns only what the start form can express (`-Xmx4096m` →
+`4096M`); a `-Xmx` in kilobytes, in bytes, or replaced by `MaxRAMPercentage`
+yields nothing. Whatever comes back is remembered and typed straight into the
+memory field, so a figure `_start_server()` would then refuse is worse than no
+figure at all — the admin would get a box that looks filled in and a Start that
+says "Invalid memory value".
+
+Neither reader touches `last_mode`. A script-started server whose script sets
+`-Xmx` refreshes the jar form's defaults underneath, but the page still comes
+back on the script form it was last used on, and `_autostart_plan()` still runs
+the script.
+
+On the client, both edges of a run call `reloadStartForm()`, which is
+`loadJars()` with `jarsLoaded` **and `selectedJar`** cleared. Clearing both is
+the point: `loadJars()` loads once per visit and treats an existing
+`selectedJar` as the admin's own choice, so re-fetching alone would leave the
+old pick highlighted next to a status line naming a different jar. There is no
+choice to protect on either edge — the whole form is inert while the server runs.
+The running edge fires on `wasRunning === false`, a real transition, not on the
+`null` of a first load: `srvStartPolling()` already calls `loadJars()` there, and
+the startup observation has already put the values in the store by then.
 
 ### Two start forms: a jar, or the game's own script
 
@@ -267,18 +319,44 @@ Measured with util-linux 2.41 and sudo 1.9 (a real tmux pane, java on `pts/0`):
 
 In every case `ps -t <pane_tty>` shows only the wrapper, so the panel reported
 Stopped for a server that was plainly up. The fallback: a `su`/`sudo`/`doas` on
-the pane's tty **that was handed a command** counts as the server, and the jar
-name is dug out of the wrapper's own arguments when it's there. This is crude on
-purpose — we take the wrapper at its word rather than walking process trees or
-parsing `/proc` for another user's children, which `hidepid` can hide anyway.
+the pane's tty **that was handed a command** counts as the server.
 
-`_wrapper_runs_a_command()` is what keeps it from being *too* crude: an admin
+`_wrapper_runs_a_command()` is what keeps that from being too crude: an admin
 sitting in `su - mc` or `sudo -i` is a shell, not a server, and counting one
 would peg the panel at Running with no way to start anything. `su` needs `-c`;
 `sudo`/`doas` need a trailing command and no `-i`/`-s`.
 
-Seeing a real `java` always wins over the wrapper, so the jar reported for a
-normally-started server is unchanged.
+*Whether* it is running is therefore taken on the wrapper's word. **What** it is
+running is not: `_java_under()` walks `/proc` for a java process descended from
+the wrapper and reads jar and heap off that command line. The wrapper's own
+arguments describe the server only when the admin spelled the java line out at
+the prompt — `sudo -u mc ./start.sh` says nothing at all — and they are kept
+only as the fallback for when the walk comes back empty.
+
+The walk is cheap and bounded: `/proc/<pid>/comm` filters to java processes
+first, then `_proc_descends_from()` climbs the ppid chain (capped at 32 hops,
+so a bad `/proc` read cannot loop). It runs only in the wrapper case, and only
+on the stopped → running edge for the store's purposes. `_proc_ppid()` splits
+`stat` **after the last `)`** — comm is parenthesised and may itself contain
+both spaces and parentheses, which is the usual trap with that file.
+
+`/proc/<pid>/cmdline` is world-readable, so this reaches another user's JVM from
+an unprivileged panel; `hidepid=2` and macOS have no answer for it, which is why
+None is an ordinary result rather than an error. Finding the JVM also yields a
+real `pid`, so the heap card now works for an su/sudo server whenever the panel
+can read that user's `hsperfdata` file — and says *which* of the two it couldn't
+do when it can't.
+
+What it does **not** yield is a directory: `cwd` is the one part of another
+user's process that stays unreadable, so `wrapped: True` travels in the info
+dict and `_observe_session()` passes `allow_pane=False` on the strength of it.
+See the directory-learning section — falling back to the pane there would record
+the privilege wrapper's CWD as the game dir.
+
+Seeing a real `java` on the tty always wins over the wrapper, so nothing about a
+normally-started server changed. What did change for every case is that argv now
+comes from `/proc` when it can: `ps -o args=` hands back one space-joined string,
+in which a jar path containing a space is indistinguishable from two arguments.
 
 ## Player management (whitelist / ops / bans)
 
@@ -357,8 +435,12 @@ Bedrock player types in.
 `/tmp/hsperfdata_<user>/<pid>` and returns `used` / `committed` / `reserved` / `peak`
 in bytes, plus `collections`. The Overview card draws them as one bar: the track is
 `reserved` (-Xmx), the fill is `used`, and a notch marks `peak`. `_pane_java_info()`
-also returns `pid` — the java process itself, `None` in the su/sudo case, since a
-wrapper's pid is no use to anything wanting to read a JVM's counters.
+also returns `pid`, and it is always the java process itself — a wrapper's pid is no
+use to anything wanting to read a JVM's counters, so an su/sudo server contributes a
+pid only when `_java_under()` located the real one. That case then turns on file
+permissions: the counter file is mode 0600, so a root panel reads another user's
+server and an unprivileged one gets "counter file is not readable" instead of the
+older, blunter "java process not visible".
 
 Every HotSpot JVM memory-maps that file and keeps it current as a matter of course;
 it is what `jstat` reads. The format is a documented binary — 32-byte prologue, then

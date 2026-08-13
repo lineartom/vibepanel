@@ -1268,13 +1268,24 @@ async function loadServerStatus() {
   }
   const startSec = $('srv-start-section');
   if (data.running) {
+    // What it is running, read off the process itself: the jar, and the heap it
+    // was given. Either can be unknown — a command line with no -jar, a -Xmx we
+    // don't recognise, a privilege wrapper we couldn't see through — so the line
+    // is built from whichever we have, and omitted when we have neither.
+    const ran = [data.jar, data.mem].filter(Boolean).map(esc).join(' &middot; ');
     card.innerHTML = `
       <div class="srv-status-row">
         <span class="srv-dot running"></span>
         <span class="srv-status-label">Running</span>
         <button id="btn-stop" class="btn btn-danger btn-sm">&#x25A0; Stop</button>
       </div>
-      ${data.jar ? `<div class="srv-jar">${esc(data.jar)}</div>` : ''}`;
+      ${ran ? `<div class="srv-jar">${ran}</div>` : ''}`;
+    // Stopped → running: the panel has just read that jar and heap off the
+    // running process and remembered them, so re-read the form to match. The
+    // case this is for is a server started by hand at the pane — its settings
+    // were never typed into this page, and without this the form would sit
+    // describing the previous run right up until someone pressed Start.
+    if (wasRunning === false) reloadStartForm();
     // Keep the start section visible but grayed out and inert.
     startSec.hidden = false;
     startSec.classList.add('srv-start-disabled');
@@ -1288,10 +1299,7 @@ async function loadServerStatus() {
       </div>`;
     // On running → stopped, re-fetch the jar list so the just-saved
     // last-used jar becomes the preselected default.
-    if (wasRunning === true) {
-      jarsLoaded = false;
-      loadJars();
-    }
+    if (wasRunning === true) reloadStartForm();
     startSec.hidden = false;
     startSec.classList.remove('srv-start-disabled');
     setStartFormDisabled(false);
@@ -1319,6 +1327,19 @@ async function stopServer() {
     await fetch(api('/api/server/stop'), { method: 'POST' });
   } catch (_) { /* poll will surface any error */ }
   setTimeout(loadServerStatus, 2000);
+}
+
+// Re-read the start form from the panel, discarding this visit's jar pick.
+//
+// Both flags have to go: loadJars() loads once per visit, and even when made to
+// run again it treats an existing selectedJar as the admin's choice and leaves
+// it alone. On either edge of a run there is no such choice to protect — the
+// form is inert while the server is up — and the point of re-reading is to
+// replace whatever was picked before with what the server actually ran.
+function reloadStartForm() {
+  jarsLoaded  = false;
+  selectedJar = null;
+  loadJars();
 }
 
 // Loads the whole start form — the jar list, and the script name beside it,

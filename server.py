@@ -208,8 +208,120 @@ def _wrapper_runs_a_command(argv: list) -> bool:
     return any(not t.startswith("-") for t in rest)
 
 
+def _proc_argv(pid: int) -> list | None:
+    """A process's real argv from /proc, or None where that can't be read.
+
+    Preferred over `ps -o args=`, which hands back one space-joined string: a
+    jar path containing a space is indistinguishable from two arguments there,
+    and a long java command line can be truncated. Kernel threads have an empty
+    cmdline, which reads as None here — nothing we care about looks like that.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            argv = [a for a in fh.read().decode("utf-8", "replace").split("\0") if a]
+    except (OSError, ValueError):
+        return None
+    return argv or None
+
+
+def _proc_ppid(pid: int) -> int | None:
+    """A process's parent from /proc/<pid>/stat.
+
+    The comm field is in parentheses and may itself contain spaces and
+    parentheses, so the line is split *after* the last ')' — the usual trap
+    with this file. ppid is then the second field of what remains.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            after = fh.read().rpartition(")")[2].split()
+        return int(after[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _proc_descends_from(pid: int, ancestor: int) -> bool:
+    """Walk pids up from `pid` looking for `ancestor`. Bounded, never loops."""
+    for _ in range(32):
+        pid = _proc_ppid(pid)
+        if pid is None or pid <= 1:
+            return False
+        if pid == ancestor:
+            return True
+    return False
+
+
+def _java_under(wrapper_pid: int) -> dict | None:
+    """Find the java a privilege wrapper started: {"pid": int, "argv": list}.
+
+    The wrapper severs the tty (see _pane_java_info), so `ps -t` cannot reach
+    the JVM and all the pane can show us is the wrapper's own arguments. Those
+    describe the server only when the admin spelled the whole java line out at
+    the prompt; `sudo -u mc ./start.sh` says nothing about jar or heap. So walk
+    /proc instead and read the command line off the process itself.
+
+    /proc/<pid>/cmdline is world-readable, so this works for another user's JVM
+    from an unprivileged panel — but `hidepid=2` hides the entry entirely and
+    macOS has no /proc at all, hence None being an ordinary answer rather than
+    an error. A java that answers here is still only *evidence*: its cwd stays
+    unreadable without privilege, which is why the caller marks it `wrapped`.
+    """
+    try:
+        pids = [int(e) for e in os.listdir("/proc") if e.isdigit()]
+    except OSError:
+        return None
+
+    fallback = None
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/comm") as fh:
+                if fh.read().strip() != "java":
+                    continue
+        except OSError:
+            continue        # gone between listdir and open, or hidden from us
+        if not _proc_descends_from(pid, wrapper_pid):
+            continue
+        argv = _proc_argv(pid)
+        if not argv:
+            continue
+        # A start script may run helper JVMs of its own; the one that names a
+        # jar is the server. Anything else is only used if nothing better turns
+        # up, so we still report a pid for the heap card.
+        if _java_jar(argv):
+            return {"pid": pid, "argv": argv}
+        if fallback is None:
+            fallback = {"pid": pid, "argv": argv}
+    return fallback
+
+
+def _java_jar(argv: list) -> str | None:
+    """The jar a java command line runs, as a bare filename."""
+    for i, tok in enumerate(argv[:-1]):
+        if tok == "-jar" and argv[i + 1].endswith(".jar"):
+            return os.path.basename(argv[i + 1])
+    return None
+
+
+def _java_mem(argv: list) -> str | None:
+    """The -Xmx a java command line carries, in the form the panel writes.
+
+    Only the shapes the start form can express are returned: `-Xmx4096m`
+    becomes "4096M", while `-Xmx2048k` and a bare byte count become nothing at
+    all. Whatever comes back here is remembered as last_mem and put straight
+    into the memory field, so a figure _start_server() would then refuse is
+    worse than no figure — the admin gets a box that looks filled in and a
+    Start that says "Invalid memory value".
+    """
+    for tok in argv:
+        m = re.fullmatch(r"-Xmx(\d+)([MmGg])", tok)
+        if m:
+            return f"{m.group(1)}{m.group(2).upper()}"
+    return None
+
+
 def _pane_java_info(target: str = None) -> dict:
-    """Scan the pane's tty for a java process; returns {"running": bool, "jar": str|None}.
+    """Scan the pane's tty for a java process.
+
+    Returns {"running", "jar", "mem", "pid", "wrapped"}.
 
     Uses #{pane_tty} + ps -t so it finds java regardless of how it was started:
     typed directly, via exec, or as a grandchild of a wrapper script
@@ -225,31 +337,40 @@ def _pane_java_info(target: str = None) -> dict:
 
     So a wrapper that was handed a command is taken at its word and counted as
     the server — crude, but the alternative is reporting Stopped for a server
-    that is plainly up. The jar name is dug out of the wrapper's own arguments
-    when it's there (`su mc -c 'java … -jar server.jar'`), unknown when not.
+    that is plainly up. Where it goes further than taking its word is in *what*
+    is running: `_java_under()` walks /proc for the JVM the wrapper started and
+    reads jar and heap off that process, because the wrapper's own arguments
+    only describe the server when the admin typed the whole java line at the
+    prompt — `sudo -u mc ./start.sh` describes nothing. Its arguments remain the
+    fallback for when /proc can't answer.
 
-    `pid` is the java process itself, and is None in the wrapper case — the
-    wrapper's own pid is no use to anything that wants to talk to the JVM.
+    `pid` is the java process itself, and stays None when the wrapper hid it
+    from us — a wrapper's own pid is no use to anything wanting to talk to a JVM.
+
+    `wrapped` says the evidence came through su/sudo/doas. It matters to the
+    caller even when we did find the JVM: /proc/<pid>/cmdline is world-readable
+    but /proc/<pid>/cwd is not, so a wrapped pid may be one we can name the jar
+    of and still not locate the game dir of. See _observe_session().
 
     Raises subprocess.CalledProcessError if the tmux target is unreachable.
     """
+    def stopped() -> dict:
+        return {"running": False, "jar": None, "mem": None,
+                "pid": None, "wrapped": False}
+
     t = target or TMUX_TARGET
     pane_tty = subprocess.run(
         ["tmux", "display-message", "-t", t, "-p", "#{pane_tty}"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     if not pane_tty:
-        return {"running": False, "jar": None, "pid": None}
+        return stopped()
 
     tty = pane_tty.removeprefix("/dev/")
     ps = subprocess.run(
         ["ps", "-t", tty, "-o", "pid=,args="],
         capture_output=True, text=True,
     )
-
-    def jar_from(args: str) -> str | None:
-        m = re.search(r"-jar\s+(\S+\.jar)", args)
-        return os.path.basename(m.group(1)) if m else None
 
     wrapper = None
     for line in ps.stdout.splitlines():
@@ -263,14 +384,26 @@ def _pane_java_info(target: str = None) -> dict:
         base = os.path.basename(argv[0])
         if base == "java":
             pid = int(parts[0]) if parts[0].isdigit() else None
-            return {"running": True, "jar": jar_from(args), "pid": pid}
+            # ps joins argv with spaces, so a path containing one is already
+            # ambiguous by the time we see it. Ask /proc for the real argv when
+            # we can, and keep the split string for when we can't.
+            real = _proc_argv(pid) if pid else None
+            argv = real or argv
+            return {"running": True, "jar": _java_jar(argv),
+                    "mem": _java_mem(argv), "pid": pid, "wrapped": False}
         # Remember it, but keep looking: seeing java itself is always better.
         if wrapper is None and base in _PRIV_WRAPPERS and _wrapper_runs_a_command(argv):
-            wrapper = args
+            wrapper = (int(parts[0]) if parts[0].isdigit() else None, argv)
 
     if wrapper:
-        return {"running": True, "jar": jar_from(wrapper), "pid": None}
-    return {"running": False, "jar": None, "pid": None}
+        wpid, wargv = wrapper
+        # The JVM itself if /proc will show it to us, the wrapper's own command
+        # line if not — `su mc -c 'java … -jar server.jar'` still says plenty.
+        found = _java_under(wpid) if wpid else None
+        argv  = found["argv"] if found else wargv
+        return {"running": True, "jar": _java_jar(argv), "mem": _java_mem(argv),
+                "pid": found["pid"] if found else None, "wrapped": True}
+    return stopped()
 
 
 def _is_running(target: str = None) -> bool:
@@ -358,6 +491,17 @@ def _session_state(session: str) -> dict:
     """Everything the store knows about one session (a copy; never the live dict)."""
     with _PANEL_LOCK:
         return dict(_PANEL_STATE["sessions"].get(session, {}))
+
+
+def _confirmed_dir(session: str) -> str | None:
+    """This session's game dir, but only if it was read off a running server.
+
+    For callers that are about to *write* into the directory: an unconfirmed dir
+    is a pane's CWD, which is a fine guess to show and a poor place to leave
+    files.
+    """
+    st = _session_state(session)
+    return st.get("dir") if st.get("dir_confirmed") else None
 
 
 def _update_session_state(session: str, **fields) -> bool:
@@ -592,7 +736,7 @@ def _game_dir(target: str, ensured: str = None) -> str:
 _LAST_RUNNING = {}
 
 
-def _running_game_dir(target: str, pid: int) -> str | None:
+def _running_game_dir(target: str, pid: int, allow_pane: bool = True) -> str | None:
     """The CWD of a running server: the one directory we can be sure of.
 
     /proc/<pid>/cwd is the java process itself, which beats the pane's
@@ -600,11 +744,20 @@ def _running_game_dir(target: str, pid: int) -> str | None:
     leader is the wrapper script, not the server. Falls back to the pane when
     that read is not available: another user's process under hidepid, or no /proc
     at all.
+
+    `allow_pane=False` withdraws that fallback, and the su/sudo case needs it:
+    there the pane's foreground process is the privilege wrapper, whose CWD is
+    wherever the admin's shell happened to be. Locating the JVM through /proc
+    does not change that — cwd is the one thing about another user's process we
+    still cannot read — so a wrapped server either tells us its own directory or
+    tells us nothing.
     """
     try:
         return os.readlink(f"/proc/{pid}/cwd")
     except OSError:
         pass
+    if not allow_pane:
+        return None
     try:
         return tmux_pane_path(target) or None
     except Exception:
@@ -641,19 +794,33 @@ def _observe_session(target: str, info: dict, ensured: str = None) -> None:
     try:
         if running:
             # Only on the edge: re-reading /proc every poll buys nothing, since a
-            # process cannot change its own CWD out from under itself here.
+            # process cannot change its own CWD out from under itself here, nor
+            # rewrite the command line it was started with.
             if was is True:
                 return
             pid = info.get("pid")
-            # No pid means su/sudo: java is off our tty entirely and the pane's
-            # foreground process is the privilege wrapper, whose CWD is wherever
-            # the admin's shell happened to be. Recording that would poison the
-            # store with a confident-looking wrong path.
-            if pid is None:
-                return
-            gdir = _running_game_dir(target, pid)
+            gdir = None
+            if pid is not None:
+                # Under a privilege wrapper the pane's foreground process is the
+                # wrapper, whose CWD is wherever the admin's shell happened to
+                # be — so no pane fallback here. Recording that would poison the
+                # store with a confident-looking wrong path.
+                gdir = _running_game_dir(target, pid,
+                                         allow_pane=not info.get("wrapped"))
             if gdir and _update_session_state(session, dir=gdir, dir_confirmed=True):
                 print(f"session '{session}': game dir is {gdir} (seen running)")
+
+            # A server that came up outside the panel — started by hand at the
+            # pane, or by something else entirely — is the only account of what
+            # it was started with, and this edge is the moment to take it down:
+            # the jar and heap now on screen are the ones actually running, and
+            # they are what the start form offers once it stops. A dir we merely
+            # guessed is not written to; there is no sense recording a game's
+            # habits into a directory that may not be that game.
+            gdir = gdir or _confirmed_dir(session)
+            if gdir:
+                _remember_run(gdir, session,
+                              last_jar=info.get("jar"), last_mem=info.get("mem"))
             return
 
         # Stopped. Track the pane while the directory is still only a guess.
@@ -1483,7 +1650,8 @@ def api_server_heap():
 
     pid = info.get("pid")
     if not pid:
-        # A privilege wrapper hides the JVM from us entirely — see _pane_java_info.
+        # A privilege wrapper took the JVM off our tty, and the /proc walk that
+        # normally still finds it came back empty — see _pane_java_info.
         return jsonify({"ok": False, "running": True,
                         "error": "java process not visible (started via su/sudo)"})
 
@@ -1834,11 +2002,17 @@ def api_server_stop():
     target = _session_target()
     if not _is_running(target):
         return jsonify({"ok": False, "error": "Server is not running"}), 409
-    # Remember the jar this server was running so the UI can preselect it
-    # next time. Best-effort: never block the stop.
+    # Remember the jar this server was running, and the heap it was running
+    # with, so the UI can put both back next time. _start_server() already
+    # records them when the panel is what started the server; this is the path
+    # that covers one started by hand at the pane, where the process itself is
+    # the only account of what was chosen. _remember_run() drops whichever of
+    # the two we could not read, leaving the previous value rather than
+    # blanking it. Best-effort throughout: never block the stop.
     try:
-        jar = _pane_java_info(target).get("jar")
-        _remember_run(tmux_pane_path(target), target.split(":")[0], last_jar=jar)
+        info = _pane_java_info(target)
+        _remember_run(tmux_pane_path(target), target.split(":")[0],
+                      last_jar=info.get("jar"), last_mem=info.get("mem"))
     except Exception:
         pass
     try:
