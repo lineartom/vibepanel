@@ -140,18 +140,49 @@
         </div>
       </div>
 
-      <!-- Start form — shown only when stopped -->
+      <!-- Start form — shown only when stopped.
+           Two exclusive ways to start: a jar the panel picks and gives memory
+           to, or the game's own start script, which owns its own flags. The
+           radio decides which set of fields is live *and* which one gets sent,
+           so the inactive one can never contribute to the command. -->
       <div id="srv-start-section" hidden>
         <h2 class="section-title">Start Server</h2>
-        <div id="jar-list-wrap">
-          <p class="hint">Loading&hellip;</p>
+        <div class="card start-mode-card">
+          <label class="checkbox-label">
+            <input type="radio" name="start-mode" value="jar" checked>
+            Server jar
+          </label>
+          <label class="checkbox-label">
+            <input type="radio" name="start-mode" value="script">
+            Custom start script
+          </label>
         </div>
-        <div class="card mem-card">
-          <label class="field-label" for="mem-input">Memory <span class="muted">(-Xmx and -Xms)</span></label>
-          <input id="mem-input" class="mem-input" type="text" value="1024M"
-                 placeholder="e.g. 1024M or 2G" autocomplete="off" spellcheck="false">
-          <p class="hint">Common: 512M &bull; 1024M &bull; 2G &bull; 4G</p>
+
+        <div id="start-jar-fields">
+          <div id="jar-list-wrap">
+            <p class="hint">Loading&hellip;</p>
+          </div>
+          <div class="card mem-card">
+            <label class="field-label" for="mem-input">Memory <span class="muted">(-Xmx and -Xms)</span></label>
+            <input id="mem-input" class="mem-input" type="text" value="1024M"
+                   placeholder="e.g. 1024M or 2G" autocomplete="off" spellcheck="false">
+            <p class="hint">Common: 512M &bull; 1024M &bull; 2G &bull; 4G</p>
+          </div>
         </div>
+
+        <div id="start-script-fields" hidden>
+          <div class="card mem-card">
+            <label class="field-label" for="script-input">Script <span class="muted">(in the game directory)</span></label>
+            <input id="script-input" class="mem-input script-input" type="text"
+                   placeholder="e.g. start.sh" list="script-suggestions"
+                   autocomplete="off" spellcheck="false" maxlength="255">
+            <datalist id="script-suggestions"></datalist>
+            <p class="hint">Run as <code>./name</code> from the game directory. It must be
+               an executable file there &mdash; no slashes. Memory and every other flag
+               come from the script itself.</p>
+          </div>
+        </div>
+
         <button id="btn-start" class="btn btn-primary btn-wide" disabled>&#x25B6; Start Server</button>
         <div id="start-feedback" aria-live="polite"></div>
       </div>

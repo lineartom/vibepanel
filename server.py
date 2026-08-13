@@ -426,6 +426,26 @@ def _last_mem(gdir: str, session: str) -> str | None:
     return _load_state(gdir).get("last_mem", {}).get(session)
 
 
+# The two ways a server can be started, and they are exclusive: a jar with a
+# memory figure the panel supplies, or the game's own start script, which owns
+# its flags and leaves the panel with nothing to say about memory.
+_START_MODES = ("jar", "script")
+
+
+def _last_script(gdir: str, session: str) -> str | None:
+    return _load_state(gdir).get("last_script", {}).get(session)
+
+
+def _last_mode(gdir: str, session: str) -> str:
+    """Which of the two start forms this server last used: "jar" or "script".
+
+    Defaults to "jar" — that is what every state file written before custom
+    scripts existed means, and it is the mode the panel had until now.
+    """
+    mode = _load_state(gdir).get("last_mode", {}).get(session)
+    return mode if mode in _START_MODES else "jar"
+
+
 def _resolve_tmux_target(target: str) -> str:
     """Return target if it exists; if not and exactly one session is visible, use that."""
     # has-session operates on the session name only, not window/pane suffixes.
@@ -1498,7 +1518,8 @@ def _list_jars(gdir: str) -> list:
 
 @app.route("/api/server/jars")
 def api_server_jars():
-    """List .jar files available in the configured jars directory."""
+    """Everything the start form needs: the jars, the start-script suggestions,
+    and which of the two this server last used."""
     target = _session_target()
     try:
         gdir = tmux_pane_path(target)
@@ -1509,7 +1530,10 @@ def api_server_jars():
         session = target.split(":")[0]
         return jsonify({"ok": True, "jars": _list_jars(gdir), "jars_dir": JARS_DIR,
                         "last_jar": _last_jar(gdir, session),
-                        "last_mem": _last_mem(gdir, session)})
+                        "last_mem": _last_mem(gdir, session),
+                        "scripts": _list_scripts(gdir),
+                        "last_mode": _last_mode(gdir, session),
+                        "last_script": _last_script(gdir, session)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1522,50 +1546,141 @@ class StartError(ValueError):
         self.status = status
 
 
-def _start_server(target: str, gdir: str, jar: str, mem: str) -> str:
-    """Type a java command into the session's pane. Returns the jar it launched.
+def _resolve_start_script(gdir: str, name: str) -> str:
+    """Check a custom start script and return the path we would run.
+
+    A server that is launched by its own start.sh — for the JVM flags, a
+    pre-launch backup, a restart loop — cannot be described by a jar and a
+    memory figure, so the panel takes the script's *name* instead. That name
+    comes from the admin rather than off a list we read, which is the whole
+    difference from the jar path, so every claim it makes is checked here:
+
+      no slashes        it is a filename, not a path. `--server-dir/../..` and
+                        `/etc/init.d/anything` are refused outright rather than
+                        normalised into something that might resolve.
+      no control chars  the line is typed at a pane, and a newline arrives as
+                        Enter — ending our command and running the remainder.
+                        shlex.quote() would keep the shell happy with it, which
+                        is exactly why it can't be the only check.
+      inside gdir       the *resolved* path's parent must be the game dir, so a
+                        symlink pointing out of it is refused too.
+      a plain file      isfile(), so directories, fifos and sockets are out.
+      executable        we run it as ./name; without +x that is a shell error
+                        in the pane the admin then has to go and read.
+
+    Raises StartError for anything refused; returns the resolved path.
+    """
+    if not name:
+        raise StartError("No start script named")
+    if "/" in name or "\\" in name or name in (".", ".."):
+        raise StartError("Start script must be a plain filename in the game "
+                         "directory, with no slashes")
+    if any(ch < " " or ch == "\x7f" for ch in name):
+        raise StartError("Start script name contains control characters")
+
+    real = os.path.realpath(os.path.join(gdir, name))
+    if os.path.dirname(real) != os.path.realpath(gdir):
+        raise StartError(f"Start script resolves outside the game directory: {name}")
+    if not os.path.isfile(real):
+        raise StartError(f"No such start script in the game directory: {name}", 404)
+    if not os.access(real, os.X_OK):
+        raise StartError(f"Start script is not executable — chmod +x {name}")
+    return real
+
+
+def _list_scripts(gdir: str) -> list:
+    """Names the game dir offers as start scripts, for the UI's name field.
+
+    Only a *suggestion* list, unlike _list_jars(): the admin may type a name
+    that isn't here — a script written since the page loaded — so this is not
+    the gate. _resolve_start_script() is, and every entry is put through it, so
+    the list can never offer a name that Start would then refuse.
+    """
+    try:
+        entries = sorted(f for f in os.listdir(gdir) if not f.startswith("."))
+    except OSError:
+        return []
+    out = []
+    for name in entries:
+        try:
+            _resolve_start_script(gdir, name)
+        except (StartError, OSError):
+            continue
+        out.append(name)
+    return out
+
+
+def _start_server(target: str, gdir: str, jar: str = None, mem: str = None,
+                  mode: str = "jar", script: str = None) -> str:
+    """Type a start command into the session's pane. Returns what it launched.
 
     The single start path: the Start button and the autostart pass both come
     through here, so what happens at boot is exactly what happens on a click.
     Raises StartError for anything refused.
-    """
-    mem = str(mem or "").strip().upper()
-    if not jar:
-        raise StartError("No jar selected")
-    # fullmatch, not match: Python's `$` also matches just before a trailing
-    # newline, so `^\d+[MG]$` accepts "1024M\n". The .strip() above removes it
-    # today, but a newline reaching send-keys would be typed as Enter — ending
-    # the java line and running whatever came after it. Don't leave that hanging
-    # on a .strip() staying put.
-    if not re.fullmatch(r'\d+[MG]', mem):
-        raise StartError("Invalid memory value — use e.g. 1024M or 2G")
 
-    # The caller *selects* a jar; it never contributes to the path we build.
-    # Enumerate what is actually in the jars dir and require an exact match, then
-    # use the entry we listed. No pattern-matching on the client's string can be
-    # as trustworthy as "this is one of the files we just read off disk", and it
-    # is the same list the UI offered, so anything else is a stale or forged pick.
-    selected = next((f for f in _list_jars(gdir) if f == jar), None)
-    if selected is None:
-        raise StartError(f"No such jar in {JARS_DIR}: {jar}", 404)
-    jar_path = os.path.join(gdir, JARS_DIR, selected)
+    Two mutually exclusive forms, and `mode` picks one rather than the presence
+    of a field doing it: a UI that sends both (a script named, a jar still
+    selected from before) must not be silently resolved one way here, and the
+    admin's last choice is what the store remembers.
+    """
+    mode = str(mode or "jar").strip().lower()
+    if mode not in _START_MODES:
+        raise StartError(f"Unknown start mode: {mode}")
+
+    # Each branch settles on what to run and what to remember about it; the two
+    # then share one tail, so a script-started server is launched, guarded and
+    # recorded by exactly the same code a jar-started one is.
+    #
+    # Both lines are *meant* for a shell, unlike the console commands. gdir
+    # comes from the pane's CWD or the store, never from us, so quote it —
+    # which also makes paths containing spaces work, as they previously did not.
+    #
+    # The `cd` goes to gdir, the same directory the jar or script was just
+    # resolved in, so the server's CWD and what it runs can never disagree. It
+    # used to go to SERVER_DIR instead, which only lined up when the pane
+    # already happened to be there: with the pane elsewhere it ran a jar from
+    # one game dir with the working directory of another. Where the pane is
+    # already gdir this is a no-op, and a harmless one — it also closes the gap
+    # between reading the pane's path and typing the line.
+    if mode == "script":
+        script = str(script or "").strip()
+        _resolve_start_script(gdir, script)
+        # ./name, the way the admin runs it by hand — and having cd'd first, the
+        # script gets the working directory it is entitled to assume.
+        cmd      = f"cd {shlex.quote(gdir)} && {shlex.quote('./' + script)}"
+        launched = script
+        remember = {"last_mode": "script", "last_script": script}
+    else:
+        mem = str(mem or "").strip().upper()
+        if not jar:
+            raise StartError("No jar selected")
+        # fullmatch, not match: Python's `$` also matches just before a trailing
+        # newline, so `^\d+[MG]$` accepts "1024M\n". The .strip() above removes
+        # it today, but a newline reaching send-keys would be typed as Enter —
+        # ending the java line and running whatever came after it. Don't leave
+        # that hanging on a .strip() staying put.
+        if not re.fullmatch(r'\d+[MG]', mem):
+            raise StartError("Invalid memory value — use e.g. 1024M or 2G")
+
+        # The caller *selects* a jar; it never contributes to the path we build.
+        # Enumerate what is actually in the jars dir and require an exact match,
+        # then use the entry we listed. No pattern-matching on the client's
+        # string can be as trustworthy as "this is one of the files we just read
+        # off disk", and it is the same list the UI offered, so anything else is
+        # a stale or forged pick. A script name cannot be handled this way — the
+        # admin types it — which is what _resolve_start_script() is for.
+        selected = next((f for f in _list_jars(gdir) if f == jar), None)
+        if selected is None:
+            raise StartError(f"No such jar in {JARS_DIR}: {jar}", 404)
+        jar_path = os.path.join(gdir, JARS_DIR, selected)
+
+        cmd      = (f"cd {shlex.quote(gdir)} && "
+                    f"java -Xmx{mem} -Xms{mem} -jar {shlex.quote(jar_path)} nogui")
+        launched = selected
+        remember = {"last_mode": "jar", "last_jar": selected, "last_mem": mem}
 
     if _is_running(target):
         raise StartError("Server is already running", 409)
-
-    # Unlike the console commands, this line is *meant* for a shell. gdir comes
-    # from the pane's CWD or the store, never from us, so quote it — which also
-    # makes paths containing spaces work, as they previously did not.
-    #
-    # The `cd` goes to gdir, the same directory the jar was just listed from, so
-    # the server's CWD and its jar can never disagree. It used to go to
-    # SERVER_DIR instead, which only lined up when the pane already happened to
-    # be there: with the pane elsewhere it ran a jar from one game dir with the
-    # working directory of another. Where the pane is already gdir this is a
-    # no-op, and a harmless one — it also closes the gap between reading the
-    # pane's path and typing the line.
-    cmd = (f"cd {shlex.quote(gdir)} && "
-           f"java -Xmx{mem} -Xms{mem} -jar {shlex.quote(jar_path)} nogui")
 
     # This used to create the session with `cmd` as its process when one was
     # missing, which tied the session's life to the server's: stopping the
@@ -1578,8 +1693,8 @@ def _start_server(target: str, gdir: str, jar: str, mem: str) -> str:
     # Remember on start, not just on stop, so stops that happen outside the
     # panel (console 'stop', a crash) still leave a sensible default behind —
     # and so autostart knows what to launch and with how much.
-    _remember_run(gdir, target.split(":")[0], last_jar=selected, last_mem=mem)
-    return selected
+    _remember_run(gdir, target.split(":")[0], **remember)
+    return launched
 
 
 @app.route("/api/server/start", methods=["POST"])
@@ -1594,9 +1709,15 @@ def api_server_start():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     try:
+        # `or ""` rather than a get() default: the UI sends every field every
+        # time, so the one the chosen mode does not use arrives as null, and
+        # str(None) is the string "None" — a filename we would then go looking
+        # for and report as missing, instead of as absent.
         _start_server(target, gdir,
-                      str(data.get("jar", "")).strip(),
-                      str(data.get("mem", "1024M")))
+                      str(data.get("jar") or "").strip(),
+                      str(data.get("mem") or "1024M"),
+                      mode=str(data.get("mode") or "jar"),
+                      script=str(data.get("script") or ""))
         return jsonify({"ok": True})
     except StartError as e:
         return jsonify({"ok": False, "error": str(e)}), e.status
@@ -1609,21 +1730,37 @@ def api_server_start():
 def _autostart_plan(session: str) -> dict:
     """What autostart would do for a session, and what it knows.
 
-    The chain is panel store → dir → the game dir's .vibepanel.json → jar+mem, so
-    a broken link is reported as itself rather than as a blank field: "we have
-    never seen this session" and "its disk did not come back after the reboot"
-    are different problems with different fixes.
+    The chain is panel store → dir → the game dir's .vibepanel.json → the start
+    form it last used, so a broken link is reported as itself rather than as a
+    blank field: "we have never seen this session" and "its disk did not come
+    back after the reboot" are different problems with different fixes.
+
+    The script mode's last link is re-checked rather than merely read back: a
+    start.sh that lost its +x, or was renamed, is a boot-time failure worth
+    seeing on the Server page now instead of discovering after a reboot.
     """
     st   = _session_state(session)
     plan = {"autostart": bool(st.get("autostart")),
             "dir": st.get("dir"), "dir_confirmed": bool(st.get("dir_confirmed")),
-            "jar": None, "mem": None, "problem": None}
+            "mode": "jar", "jar": None, "mem": None, "script": None,
+            "problem": None}
 
     if not plan["dir"]:
         plan["problem"] = "no game directory known for this session yet"
         return plan
     if not os.path.isdir(plan["dir"]):
         plan["problem"] = f"game directory is not readable: {plan['dir']}"
+        return plan
+
+    plan["mode"] = _last_mode(plan["dir"], session)
+    if plan["mode"] == "script":
+        plan["script"] = _last_script(plan["dir"], session)
+        try:
+            _resolve_start_script(plan["dir"], plan["script"] or "")
+        except StartError as e:
+            plan["problem"] = (str(e) if plan["script"] else
+                               "no start script remembered — start this server "
+                               "from the panel once")
         return plan
 
     plan["jar"] = _last_jar(plan["dir"], session)
@@ -1661,9 +1798,11 @@ def _autostart_pass() -> None:
             if plan["problem"]:
                 print(f"autostart: '{session}' skipped — {plan['problem']}")
                 continue
-            _start_server(target, plan["dir"], plan["jar"], plan["mem"])
-            print(f"autostart: '{session}' starting {plan['jar']} "
-                  f"with {plan['mem']} in {plan['dir']}")
+            _start_server(target, plan["dir"], plan["jar"], plan["mem"],
+                          mode=plan["mode"], script=plan["script"])
+            what = (f"./{plan['script']}" if plan["mode"] == "script"
+                    else f"{plan['jar']} with {plan['mem']}")
+            print(f"autostart: '{session}' starting {what} in {plan['dir']}")
         except Exception as e:
             print(f"autostart: '{session}' failed — {e}")
 

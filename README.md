@@ -11,7 +11,7 @@ A lightweight web frontend for a Minecraft server running in a tmux session. Man
 - **Say** — broadcasts a message to the server as `[Server]`
 - **Mods** — toggle Fabric mods on/off (moves files between `mods/` and `mods-saves/`); detects byte-for-byte conflicts
 - **Worlds** — save, load, and delete world backups as `.tgz` archives; autosaves before loading
-- **Server** — start/stop the server, download Fabric jars, view MOTD, server icon, port, Geyser's Bedrock port if it's installed, and the host's public IP
+- **Server** — start/stop the server (from a jar with a memory setting, or from the game's own start script), download Fabric jars, view MOTD, server icon, port, Geyser's Bedrock port if it's installed, and the host's public IP
 
 ## Requirements
 
@@ -56,6 +56,21 @@ with a shell already in the right place.
 It only ever opens a shell. Starting the server is yours to do, unless you ask for
 it explicitly:
 
+### Jar, or your own start script
+
+The **Server** tab offers two ways to start, and you pick one:
+
+- **Server jar** — choose a `.jar` from `server-jars/` and a memory figure, and
+  VibePanel runs `java -Xmx… -Xms… -jar … nogui`.
+- **Custom start script** — name a script that lives in the server directory, and
+  VibePanel runs `./that-script` from there. Memory and every other flag come from
+  the script; VibePanel doesn't add any.
+
+The script has to be an executable ordinary file sitting directly in the server
+directory: no slashes in the name, and no pointing outside it. The name box
+suggests what's there. Whichever you used last is what the page comes back to, and
+what starts it at boot if you've asked for that.
+
 ### Starting a server automatically
 
 On the **Server** tab there's a checkbox: *Start this server when VibePanel starts*.
@@ -64,8 +79,9 @@ It's off by default and it's per server.
 Ticked, that server starts every time the VibePanel process starts — after a reboot,
 after `systemctl restart vibepanel`, whenever. There's no cleverness behind it: it
 does not try to work out whether the server was running before, or why the panel
-started. It runs the jar and memory that server last used, and it won't start a
-second copy of one that's already up. Unticked, nothing ever happens.
+started. It repeats whatever that server last started with — the same jar and memory,
+or the same start script — and it won't start a second copy of one that's already up.
+Unticked, nothing ever happens.
 
 Whatever it does, it says so in the log (`journalctl -u vibepanel`).
 

@@ -56,7 +56,7 @@ There are **two** state files, split by who owns the facts:
 | state | file | why there |
 |---|---|---|
 | expected sessions, each one's `dir` / `dir_confirmed`, `autostart` | `vibepanel-state.json` in the **panel's** working directory | panel configuration — and a session's directory cannot live inside the directory it identifies |
-| `last_jar`, `last_mem` | `.vibepanel.json` in each **game** dir | facts about that particular game, which travel with it |
+| `last_jar`, `last_mem`, `last_mode`, `last_script` | `.vibepanel.json` in each **game** dir | facts about that particular game, which travel with it |
 
 The store is held in memory and **flushed only when something changes**
 (`_update_session_state()` returns whether it did): a status poll that re-observes
@@ -167,6 +167,43 @@ supply `gdir` differently, and the difference is the point:
 - **autostart** passes the stored `dir`, because there is no admin at a pane to
   follow.
 
+### Two start forms: a jar, or the game's own script
+
+Plenty of servers are launched by a `start.sh` of their own — for JVM flags the
+panel has no field for, a pre-launch backup, a restart loop. Those cannot be
+described by "a jar and a memory figure", so `_start_server()` takes a `mode` of
+`"jar"` or `"script"` (`_START_MODES`) and the Server page offers the two as
+radio buttons, one set of fields live at a time. Memory belongs to the jar form
+only: a script owns its own flags, and a `-Xmx` box beside it would be a lie.
+
+**`mode` decides, not which field arrived populated.** The UI sends both every
+time — an admin who names a script still has a jar selected underneath — so
+picking "whichever one is filled in" would start the wrong thing the first time
+somebody switched forms without clearing the other. It is also what the store
+remembers (`last_mode`), so the page comes back on the form it was last used on.
+
+The jar path never trusts the name it is given: it matches the request against
+what `_list_jars()` just read off disk and uses *that* entry. A script name
+cannot work that way — the admin types it, and may type one created a second
+ago — so `_resolve_start_script()` checks every claim the name makes instead:
+
+| check | why |
+|---|---|
+| no `/` or `\`, and not `.`/`..` | it is a filename, not a path; nothing is normalised into something that might resolve |
+| no control characters | the line is typed at a pane, and a newline arrives as **Enter** — ending our command and running the rest. `shlex.quote()` keeps the shell happy with one, which is exactly why quoting cannot be the only check |
+| `dirname(realpath(...)) == realpath(gdir)` | the *resolved* path must sit in the game dir, so a symlink pointing out of it is refused too |
+| `isfile()` | directories, fifos and sockets are out |
+| `os.access(X_OK)` | we run it as `./name`; without `+x` that is a shell error in a pane the admin then has to go and read |
+
+It then runs as `cd <gdir> && ./<name>`, both parts `shlex.quote()`d, so a script
+with a space in its name works and the script gets the working directory it is
+entitled to assume.
+
+`_list_scripts()` fills the name field's `<datalist>` with the game dir's
+executables. It is a **suggestion** list, not the gate — a name typed by hand is
+equally acceptable — but every entry is put through `_resolve_start_script()`
+anyway, so the list can never offer something Start would then refuse.
+
 ### The autostart checkbox
 
 Per-server, on the Server tab, **default off**, stored as `autostart` in the panel
@@ -176,11 +213,17 @@ whenever the panel process starts; unticked means nothing ever happens. It lives
 the panel store rather than the game dir precisely so that reading it never depends
 on resolving a directory first — which is the condition autostart runs under.
 
-`_autostart_plan()` walks the chain **panel store → dir → `.vibepanel.json` → jar+mem**
-and reports a broken link as itself: "we have never seen this session" and "its disk
-did not come back after the reboot" are different problems with different fixes, and
-a blank field would say neither. Every outcome prints — somebody who finds a server
-running must be able to see in the panel's own log that the panel did it.
+`_autostart_plan()` walks the chain **panel store → dir → `.vibepanel.json` →
+jar+mem or script** and reports a broken link as itself: "we have never seen this
+session" and "its disk did not come back after the reboot" are different problems
+with different fixes, and a blank field would say neither. Every outcome prints —
+somebody who finds a server running must be able to see in the panel's own log that
+the panel did it.
+
+In script mode the last link is **re-checked, not just read back**: the plan runs
+the remembered name through `_resolve_start_script()`, so a `start.sh` that lost its
+`+x` or was renamed shows up as a problem on the Server page now, rather than as a
+server that quietly fails to come back after the next reboot.
 
 The one check in `_autostart_pass()` that is **not** policy is `_is_running()`:
 `systemctl restart vibepanel` on a healthy host must not type a second JVM into a
@@ -443,7 +486,8 @@ peaks are re-seeded from the next sample, so the button just calls `loadOverview
   ops.json             #   "
   banned-players.json  #   "
   get-me-fabric.sh     # auto-installed from repo root if missing
-  .vibepanel.json      # last-used jar + memory per session (written on start/stop)
+  start.sh             # optional: the game's own start script, if it has one
+  .vibepanel.json      # last-used start form per session (written on start/stop)
 ```
 
 And in the **panel's** own working directory, not the game dir:
@@ -517,9 +561,15 @@ in its history and says "some characters removed" rather than silently
 misreporting what was broadcast.
 
 `/api/server/start` is the exception that is genuinely meant for a shell: it uses
-`shlex.quote()` on the jar path and `SERVER_DIR`, both of which come from the
-pane's CWD or config rather than from us. That also makes paths containing spaces
-work, which they previously did not.
+`shlex.quote()` on the game dir and on the jar path or `./<script>`. That also makes
+paths containing spaces work, which they previously did not.
+
+The custom start script is the one place a **name from the client** reaches that
+line, and quoting is deliberately not the whole of its defence — a name is only
+accepted if `_resolve_start_script()` finds it as an executable plain file resolving
+inside the game dir, and control characters are rejected outright, because a newline
+would be typed as Enter no matter how the rest is quoted. See the start-forms section
+above for the full list.
 
 ## External network access
 

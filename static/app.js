@@ -113,6 +113,8 @@ function clickSessionTab(tab) {
     serverError    = null;
     jarsLoaded     = false;
     selectedJar    = null;
+    startMode      = 'jar';
+    startModePicked = false;
     srvPort        = null;
     resetSessionUi();
     reconnectConsole();
@@ -160,7 +162,11 @@ function resetSessionUi() {
   $('srv-autostart').disabled      = false;
   $('srv-autostart-note').textContent = '';
 
-  // Drafts aimed at one particular server.
+  // Drafts aimed at one particular server. The start form included: a script
+  // name is one game's, and left behind it would be typed at another's pane.
+  $('script-input').value     = '';
+  $('script-suggestions').innerHTML = '';
+  setStartMode('jar');          // after the clear: it re-reads the field
   $('say-input').value        = '';
   $('char-count').textContent = `0 / ${MAX_LEN}`;
   $('char-count').style.color = '';
@@ -1161,6 +1167,13 @@ let srvPollTimer = null;
 let selectedJar  = null;
 let jarsLoaded   = false;
 let srvPort      = null;
+// 'jar' | 'script'. Which of the two start forms is live, and the only thing
+// that decides what /api/server/start is sent — never "whichever field has
+// something in it", since the other one usually does too.
+let startMode    = 'jar';
+// Whether the admin has picked a mode themselves this visit, in which case the
+// remembered one must not overwrite it on the next load.
+let startModePicked = false;
 
 function srvStartPolling() {
   loadServerStatus();
@@ -1265,8 +1278,7 @@ async function loadServerStatus() {
     // Keep the start section visible but grayed out and inert.
     startSec.hidden = false;
     startSec.classList.add('srv-start-disabled');
-    $('btn-start').disabled = true;
-    $('mem-input').disabled = true;
+    setStartFormDisabled(true);
     $('btn-stop').addEventListener('click', stopServer);
   } else {
     card.innerHTML = `
@@ -1282,9 +1294,20 @@ async function loadServerStatus() {
     }
     startSec.hidden = false;
     startSec.classList.remove('srv-start-disabled');
-    $('btn-start').disabled = !selectedJar;
-    $('mem-input').disabled = false;
+    setStartFormDisabled(false);
   }
+}
+
+// Every input in the start form goes inert together while the server runs —
+// including the mode radios, so the form cannot be switched under a running
+// server and left describing something it isn't.
+function setStartFormDisabled(disabled) {
+  $('mem-input').disabled    = disabled;
+  $('script-input').disabled = disabled;
+  document.querySelectorAll('input[name="start-mode"]')
+          .forEach(r => { r.disabled = disabled; });
+  if (disabled) $('btn-start').disabled = true;
+  else updateStartEnabled();
 }
 
 async function stopServer() {
@@ -1298,6 +1321,8 @@ async function stopServer() {
   setTimeout(loadServerStatus, 2000);
 }
 
+// Loads the whole start form — the jar list, and the script name beside it,
+// since both come from /api/server/jars in one reply.
 async function loadJars() {
   if (jarsLoaded) return;
   const wrap = $('jar-list-wrap');
@@ -1309,8 +1334,22 @@ async function loadJars() {
       wrap.innerHTML = `<p class="hint">Error: ${esc(data.error)}</p>`;
       return;
     }
+
+    // Script fields first, and above the empty-jars return below: a server
+    // started by its own script very often has no jar in server-jars at all,
+    // and that must not be what stops its script name being filled in.
+    if (data.last_script && document.activeElement !== $('script-input')) {
+      $('script-input').value = data.last_script;
+    }
+    $('script-suggestions').innerHTML = (data.scripts || [])
+      .map(s => `<option value="${esc(s)}"></option>`).join('');
+    // Same "don't clobber a choice being made" rule as the jar and memory
+    // fields: the remembered mode is a default, not a correction.
+    if (!startModePicked) setStartMode(data.last_mode === 'script' ? 'script' : 'jar');
+
     if (data.jars.length === 0) {
       wrap.innerHTML = `<p class="hint">No .jar files found in <code>${esc(data.jars_dir)}</code>.</p>`;
+      updateStartEnabled();
       return;
     }
 
@@ -1339,7 +1378,7 @@ async function loadJars() {
       list.appendChild(row);
     });
 
-    $('btn-start').disabled = !selectedJar;
+    updateStartEnabled();
     jarsLoaded = true;
   } catch (err) {
     wrap.innerHTML = `<p class="hint">Error: ${esc(err.message)}</p>`;
@@ -1352,8 +1391,43 @@ function selectJar(jar) {
   $('jar-list-wrap').querySelectorAll('.jar-item').forEach(el => {
     el.classList.toggle('selected', el.dataset.jar === jar);
   });
-  $('btn-start').disabled = false;
+  updateStartEnabled();
 }
+
+// ── Jar or start script ───────────────────────────────────
+//
+// The two forms are exclusive, so only the live one is shown and only the live
+// one is read when Start is pressed. The other keeps its value — an admin who
+// looks at the script field and goes back to jars should find their jar still
+// selected — it simply has no say until its radio is picked again.
+
+function setStartMode(mode) {
+  startMode = mode === 'script' ? 'script' : 'jar';
+  document.querySelectorAll('input[name="start-mode"]').forEach(r => {
+    r.checked = r.value === startMode;
+  });
+  $('start-jar-fields').hidden    = startMode !== 'jar';
+  $('start-script-fields').hidden = startMode !== 'script';
+  updateStartEnabled();
+}
+
+// Start needs whatever the live form needs, and nothing from the other one.
+function updateStartEnabled() {
+  const ready = startMode === 'script'
+    ? $('script-input').value.trim() !== ''
+    : !!selectedJar;
+  $('btn-start').disabled = !ready || serverRunning === true;
+}
+
+document.querySelectorAll('input[name="start-mode"]').forEach(radio => {
+  radio.addEventListener('change', () => {
+    if (serverRunning === true) return;   // visible but inert while running
+    startModePicked = true;
+    setStartMode(radio.value);
+  });
+});
+
+$('script-input').addEventListener('input', updateStartEnabled);
 
 // ── Autostart ─────────────────────────────────────────────
 //
@@ -1371,7 +1445,8 @@ function renderAutostart(d) {
   if (d.problem) {
     note.textContent = d.autostart ? `Cannot start it yet: ${d.problem}.` : `${d.problem}.`;
   } else {
-    note.textContent = `Will run ${d.jar} with ${d.mem} in ${d.dir}` +
+    const what = d.mode === 'script' ? `./${d.script}` : `${d.jar} with ${d.mem}`;
+    note.textContent = `Will run ${what} in ${d.dir}` +
                        (d.dir_confirmed ? '.' : ' (directory not confirmed yet).');
   }
 }
@@ -1466,15 +1541,28 @@ $('btn-download').addEventListener('click', async () => {
 });
 
 $('btn-start').addEventListener('click', async () => {
-  if (!selectedJar) return;
   const mem      = $('mem-input').value.trim().toUpperCase();
+  const script   = $('script-input').value.trim();
   const btn      = $('btn-start');
   const feedback = $('start-feedback');
 
-  if (!/^\d+[MG]$/.test(mem)) {
-    feedback.textContent = 'Invalid memory format — use e.g. 1024M or 2G';
-    feedback.className = 'fb-error';
-    return;
+  // Only the live form is checked here. Both fields go in the body, but `mode`
+  // travels with them and decides which one the server reads — and it checks
+  // all of this again; these two are only here to save an obvious round trip.
+  if (startMode === 'script') {
+    if (!script) return;
+    if (script.includes('/') || script.includes('\\')) {
+      feedback.textContent = 'Script must be a plain filename in the game directory — no slashes.';
+      feedback.className = 'fb-error';
+      return;
+    }
+  } else {
+    if (!selectedJar) return;
+    if (!/^\d+[MG]$/.test(mem)) {
+      feedback.textContent = 'Invalid memory format — use e.g. 1024M or 2G';
+      feedback.className = 'fb-error';
+      return;
+    }
   }
 
   btn.disabled = true;
@@ -1486,7 +1574,7 @@ $('btn-start').addEventListener('click', async () => {
     const data = await sessionJson('/api/server/start', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ jar: selectedJar, mem }),
+      body:    JSON.stringify({ mode: startMode, jar: selectedJar, mem, script }),
     });
     if (data === STALE) { btn.textContent = '▶ Start Server'; return; }
 

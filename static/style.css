@@ -505,6 +505,28 @@ a { text-decoration: none; color: inherit; }
   gap: .75rem;
 }
 
+/* The jar fields are a group of two cards, so they need the section's own
+   spacing back — the section's gap only applies between its direct children. */
+#start-jar-fields {
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+}
+
+/* Which start form is in use: side by side, so the exclusivity is visible
+   rather than something you infer from one set of fields vanishing. */
+.start-mode-card {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  flex-shrink: 0;
+}
+.start-mode-card .checkbox-label { font-size: .95rem; color: var(--text); }
+.start-mode-card input { accent-color: var(--green); }
+
+/* Wider than the memory box it replaces: this one holds a filename. */
+.mem-card .script-input { width: 18rem; max-width: 100%; }
+
 .jar-list {
   background: var(--bg1);
   border: 1px solid var(--border);
@@ -531,6 +553,8 @@ a { text-decoration: none; color: inherit; }
   cursor: default;
   pointer-events: none;
 }
+#srv-start-section.srv-start-disabled .checkbox-label,
+#srv-start-section.srv-start-disabled .checkbox-label input { cursor: default; }
 
 .jar-radio {
   width: 16px; height: 16px;
