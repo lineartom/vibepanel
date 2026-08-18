@@ -2,7 +2,8 @@
 
 A lightweight web frontend for a Minecraft server running in a tmux session. Manage the server from your phone or browser without SSH-ing in.
 
-![Console, Players, Mods, Worlds, and Server pages](.github/screenshot.png)
+Leans heavily on `tmux` and `tailscale`. Then tries to stay out of your way as an admin!
+
 
 ## Features
 
