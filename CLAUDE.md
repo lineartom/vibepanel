@@ -55,7 +55,7 @@ There are **two** state files, split by who owns the facts:
 
 | state | file | why there |
 |---|---|---|
-| expected sessions, each one's `dir` / `dir_confirmed`, `autostart` | `vibepanel-state.json` in the **panel's** working directory | panel configuration — and a session's directory cannot live inside the directory it identifies |
+| expected sessions, each one's `dir` / `dir_confirmed`, `start_policy`, `backup_on_stop` | `vibepanel-state.json` in the **panel's** working directory | panel configuration — and a session's directory cannot live inside the directory it identifies |
 | `last_jar`, `last_mem`, `last_mode`, `last_script` | `.vibepanel.json` in each **game** dir | facts about that particular game, which travel with it |
 
 The store is held in memory and **flushed only when something changes**
@@ -141,7 +141,7 @@ tell us back would be both a round trip to rediscover what we just asserted and 
 race: `new-session -d` returns before the child has chdir'd and exec'd, and
 `/proc/<tpgid>/cwd` inside that window is the **tmux server's** CWD. Nothing raises
 — it is a plausible wrong path, which then reads an absent `.vibepanel.json`,
-gets `{}`, and leaves autostart quietly not firing with nothing saying why.
+gets `{}`, and leaves the start policy quietly not firing with nothing saying why.
 
 Before typing into a pane we just made, `_wait_for_shell()` polls until the pane's
 foreground process group is the shell itself (`tpgid == pane_pid`), bounded at 2 s.
@@ -157,7 +157,7 @@ reads that pane afterwards.
 
 ## Starting a server, and starting one at boot
 
-`_start_server()` is the single start path — the Start button and the autostart pass
+`_start_server()` is the single start path — the Start button and the startup policy pass
 both come through it, so what happens at boot is exactly what happens on a click. It
 raises `StartError`, which carries the status the endpoint should return.
 
@@ -170,14 +170,14 @@ supply `gdir` differently, and the difference is the point:
 - **the endpoint** passes `tmux_pane_path()` — if an admin `cd`s the pane to a
   different game and presses Start, they get *that* game. The store is for creating
   a session, not for overriding a live one.
-- **autostart** passes the stored `dir`, because there is no admin at a pane to
+- **the startup pass** passes the stored `dir`, because there is no admin at a pane to
   follow.
 
 ### What the panel remembers about the last run
 
 `_start_server()` records the whole form on the way out — mode, and then either
 jar + `last_mem` or script — so a stop that happens *outside* the panel (console
-`stop`, a crash) still leaves a usable default, and autostart knows what to
+`stop`, a crash) still leaves a usable default, and the startup pass knows what to
 launch and with how much.
 
 The other two writers read the same pair off the **running process** instead,
@@ -206,7 +206,7 @@ says "Invalid memory value".
 
 Neither reader touches `last_mode`. A script-started server whose script sets
 `-Xmx` refreshes the jar form's defaults underneath, but the page still comes
-back on the script form it was last used on, and `_autostart_plan()` still runs
+back on the script form it was last used on, and `_start_plan()` still runs
 the script.
 
 On the client, both edges of a run call `reloadStartForm()`, which is
@@ -256,34 +256,317 @@ executables. It is a **suggestion** list, not the gate — a name typed by hand 
 equally acceptable — but every entry is put through `_resolve_start_script()`
 anyway, so the list can never offer something Start would then refuse.
 
-### The autostart checkbox
+### The start policy
 
-Per-server, on the Server tab, **default off**, stored as `autostart` in the panel
-store. Nothing infers anything: not whether the server was running before, not why
-the panel started, not how long the host has been up. Ticked means it starts
-whenever the panel process starts; unticked means nothing ever happens. It lives in
-the panel store rather than the game dir precisely so that reading it never depends
-on resolving a directory first — which is the condition autostart runs under.
+Per-server, on the Server tab, three radio buttons, stored as `start_policy` in the
+panel store and **defaulting to `never`**:
 
-`_autostart_plan()` walks the chain **panel store → dir → `.vibepanel.json` →
-jar+mem or script** and reports a broken link as itself: "we have never seen this
-session" and "its disk did not come back after the reboot" are different problems
-with different fixes, and a blank field would say neither. Every outcome prints —
-somebody who finds a server running must be able to see in the panel's own log that
-the panel did it.
+| | what the panel does when the panel process starts |
+|---|---|
+| `never` | nothing, ever. The default, and where an unrecognised stored value lands |
+| `always` | starts it, whatever happened last time |
+| `unless-stopped` | starts it unless the last run was asked to stop — see below |
+
+It lives in the panel store rather than the game dir precisely so that reading it
+never depends on resolving a directory first, which is the condition the startup
+pass runs under. `_start_policy()` whitelists on the way out, like `_last_mode()`: a
+store that was hand-edited, or written by a newer panel, must never read as
+something *stronger* than the admin asked for.
+
+The old boolean `autostart` is migrated in `_load_panel_state()` — `true` → `always`,
+`false` → `never` — and the old key is **popped**, not left beside the new one. This
+file is the quickest way to see what the panel believes, and two keys that can
+disagree destroy that. No write is needed there: `_set_expected_sessions()` runs
+moments later and flushes unconditionally, so the new shape lands on disk for free.
+
+`_start_plan()` walks the chain **panel store → dir → `.vibepanel.json` → jar+mem or
+script** and reports a broken link as itself: "we have never seen this session" and
+"its disk did not come back after the reboot" are different problems with different
+fixes, and a blank field would say neither. Every outcome prints, `never` included —
+one line per session makes the panel's own log a complete account of what it decided
+at boot, which is what somebody who finds a server running (or finds one that did
+*not* come back) needs to read.
+
+It reports `problem` and `reason` separately because they answer different
+questions: `problem` is a broken link in that chain, something to go and fix, while
+`reason` is the policy's account of the decision. A server set to `never` still
+reports a missing jar — worth fixing before the admin changes their mind.
+
+Only `problem` reaches the page. `reason` is a diagnostic — it is what the boot log
+prints, and `vibepanel-state.json` holds the rest — and on the card it was noise:
+each option is a whole sentence that already says what the policy does, so a line
+restating it earned nothing. The endpoint still returns `reason` and `would_start`,
+which is where to look when a server does not come back.
+
+The three options are full-width rows in the jar picker's shape (`.policy-list` /
+`.policy-item`, sharing `.jar-list`'s container rule) rather than a labelled row of
+radios. The width is the point: it is what lets each option explain itself — "Never
+start automatically", "Always start automatically on boot", "Only start automatically
+if we weren't stopped on purpose" — which in turn is why there is no heading, since a
+label would have nothing left to add. The whole row is the hit target, and the whole
+row goes green, via `:has(input:checked)` rather than a JS-toggled `selected` class so
+the highlight cannot drift out of step with the control it describes — including in
+the moment before a rejected write is rolled back.
+
+`would_start`, not `will_start`: the plan deliberately does not consult whether the
+server is running. That check belongs to `_start_policy_pass()` alone, and asking
+tmux inside the plan would spend a round trip on every page load answering a
+question the page never asks — as well as making the GET endpoint and the boot pass
+capable of disagreeing.
 
 In script mode the last link is **re-checked, not just read back**: the plan runs
 the remembered name through `_resolve_start_script()`, so a `start.sh` that lost its
 `+x` or was renamed shows up as a problem on the Server page now, rather than as a
 server that quietly fails to come back after the next reboot.
 
-The one check in `_autostart_pass()` that is **not** policy is `_is_running()`:
+The one check in `_start_policy_pass()` that is **not** policy is `_is_running()`:
 `systemctl restart vibepanel` on a healthy host must not type a second JVM into a
 running server's pane.
 
 A tmux that cannot start at all would otherwise reprint its error on every poll,
 so failures are logged once per session (`_AUTOSTART_FAILED`) and the note is
 cleared as soon as the session exists.
+
+### `unless-stopped`, and why it reads the game's log
+
+The requirement is that it work **whether or not the panel's Stop button was used,
+and whether or not any page was open to witness the stop**. That rules out the
+obvious implementation — persisting an intent flag on the running → stopped edge in
+`_observe_session()` — because `_LAST_RUNNING` is in memory, is wiped by a panel
+restart, and only advances when somebody polls. A server stopped at the console with
+no browser open produces no edge at all, and a host reboot destroys the memo along
+with everything else.
+
+So there is **no new persisted state**. The verdict is a pure function of the
+evidence the stopped server left behind: the tail of its own `logs/latest.log`,
+read by `_last_run_ending()`. Minecraft writes two different lines on the way down,
+and they mean different things:
+
+| line | where it comes from | what it means |
+|---|---|---|
+| `Stopping the server` | the `/stop` **command's own feedback** — lang key `commands.stop.stopping`, through `sendSuccess` | **somebody asked** |
+| `Stopping server` | `MinecraftServer.stopServer()`, on the way out of the run loop | an orderly shutdown happened; says nothing about who |
+
+A SIGTERM at host shutdown runs the shutdown hook, so it produces the second and
+never the first. That is the whole discriminator, and being *content* rather than
+timing is what makes it right for "stopped, then rebooted three hours later" — the
+case no grace window can reach. It also means the Stop button needs no special
+handling: it types the same `stop` a console user does, so both leave identical
+evidence.
+
+These four strings are the whole mechanism, so they were checked against the shipped
+server jar rather than against memory or a decompiler mirror: `commands.stop.stopping`
+is literally `Stopping the server` in `assets/minecraft/lang/en_us.json`, and
+`stopServer()`'s `Stopping server` is a constant in `MinecraftServer.class`, in both a
+current version and one five years older. Worth redoing if a future version moves them
+— the failure would be silent, and it would look like every server suddenly crashing.
+Note also that the log4j config is no longer in the server jar; it ships inside
+`META-INF/libraries/com/mojang/logging/*/logging-*.jar!/log4j2.xml`.
+
+| verdict | what it saw | what happens |
+|---|---|---|
+| `asked` | the strong line | stays down |
+| `crashed` | it said it was dying — see below | starts |
+| `orderly` | the weak line only | see below |
+| `crash` | nothing at all — SIGKILL, an OOM kill, power loss | starts |
+| `absent` | no `logs/latest.log` | starts; nothing says it was stopped |
+| `unreadable` | there is one and we could not read it | stays down |
+
+`unreadable` is deliberately separated from `absent`: a disk that did not come back
+is not evidence that the admin wanted this server up, and collapsing the two would
+restart a deliberately-stopped server on exactly the host with a problem.
+
+**A crash is also an orderly shutdown, and that is the subtlest thing here.**
+`runServer()` catches `Throwable`, writes the crash report, and then its `finally`
+calls `stopServer()` — which logs the weak line unconditionally. So a heap OOM at
+3am ends the log with `Stopping server` and is indistinguishable from a `kill`,
+unless the wreckage above it is noticed. That cost a real bug: the panel refused to
+restart a crashed server *and* told the admin a signal had done it. Hence
+`_CRASH_MARKERS` and the `crashed` verdict, ranked **`asked` > `crashed` > `orderly`**:
+
+| marker | who logs it |
+|---|---|
+| `Encountered an unexpected exception` | vanilla's fatal catch |
+| `Considering it to be crashed, server will forcibly shutdown` | `ServerWatchdog`, on a hung tick |
+
+`asked` outranks `crashed` because a run whose operator typed `stop` and *then* threw
+on the way down was still asked to stop. And note the exit status cannot substitute
+for any of this: vanilla **exits 0 after a crash** — there is no `System.exit` in
+`MinecraftServer` — so a wrapper watching `$?` learns nothing.
+
+An **orderly** shutdown nobody commanded is a signal, and one comparison says which:
+if `mtime(latest.log) >= _boot_time()` the run ended during *this* boot, so something
+killed it on a live host (`kill`, `tmux kill-session`, a service manager) — deliberate,
+stays down. If it ended *before* this boot, it was the reboot's own SIGTERM — starts.
+An unknown boot time resolves to staying down, because the surprising direction for
+this feature is the panel starting a server the admin had stopped.
+
+Three traps in the scan, all of them load-bearing:
+
+- **Markers are matched against the message *body*, anchored.** `latest.log` carries
+  chat, so a substring test fires on a player typing `Stopping the server` — which
+  would let anyone on the server pin it down permanently. Split on the first `"]: "`
+  (the field separator in vanilla, Paper *and* Forge's longer prefix); the strong
+  line's optional bracket group admits the wrapped forms a non-console source
+  produces, `[Rcon: Stopping the server]` and `[Notch: Stopping the server]`. The
+  crash markers are safe under `startswith` for the same reason — chat always arrives
+  prefixed, as `<Bob> …` or `/say`'s `[Server] …`.
+- **`All dimensions are saved` is not a marker.** `/save-all flush` takes the same
+  branch and backup plugins run it on a timer, so a crash after one would read as a
+  deliberate stop.
+- **The scan runs forward and the last verdict wins**, resetting at each
+  `Starting minecraft server version`. `latest.log` normally rotates away at the next
+  server start, but that is a log4j config an admin can change, and a stale marker
+  from the previous run would otherwise report this run's crash as deliberate.
+
+What it gets wrong, and these are worth knowing rather than hiding:
+
+- `kill -9` on the JVM by hand is indistinguishable from an OOM kill — it restarts.
+- A host whose own unit does `ExecStop=tmux send-keys stop` before reboot is *telling
+  us the stop was asked for*, and the rule believes it: the server will not come back.
+  Use `always` there.
+- A mod that issues `/stop` on a nightly schedule reads as deliberate. The game cannot
+  tell us the difference between an admin asking and a scheduler asking.
+
+And three ways `latest.log` can fail to be there — note that redirecting a start
+script's output is **not** one of them, which this file used to claim. stdout is the
+`SysOut` *console* appender; `logs/latest.log` is a separate `RollingRandomAccessFile`
+appender on the same root logger, writing the file directly, so `./start.sh > out.log`
+silences the console only:
+
+- **java's CWD is not where we are looking.** `fileName="logs/latest.log"` resolves
+  against the JVM's working directory, so a `start.sh` that `cd`s before exec'ing java
+  puts it somewhere else. A *confirmed* dir is safe by construction — `_observe_session()`
+  reads it from `/proc/<java>/cwd`, the very CWD log4j resolved against — which is one
+  more reason `dir_confirmed` is worth carrying around.
+- **A custom log4j config** (`-Dlog4j.configurationFile=`, common on modpacks and on
+  hosts still carrying Log4Shell-era mitigations) can drop or rename the File appender.
+- **We cannot read it**: a server running as another user under a `0700` game dir — the
+  su/sudo case the panel otherwise supports — gives `PermissionError`, hence
+  `unreadable`, hence stays down. The intersection of two supported features, and the
+  residual most likely to be hit in practice.
+
+### Why not a pidfile
+
+The obvious cheaper idea, and it keeps coming back, so: add `--pidFile minecraft.pid`
+to the launch line plus `; rm minecraft.pid`, and restart when the file survives. It
+is a real vanilla *and* Paper option, and the game never deletes it (`writePidFile` is
+one `Files.writeString`; there is no `deleteOnExit` anywhere near it), so the idea is
+sound as far as it goes. It was rejected for what it *measures*:
+
+`;` is unconditional, so the shell removes the file whenever it outlives java — a
+clean stop and a crash alike. "Pidfile present" therefore means **the shell died with
+the JVM**, i.e. the machine went away. That is a proxy for "was this stopped on
+purpose" which fails in both directions: it stays down after an OOM-kill on a live
+host, and comes back after a deliberate `tmux kill-session`. The case that settles it
+is a crash at 03:00 followed by a reboot at 08:00 — the shell removed the file at
+03:00, so the server never returns and the panel reports nothing wrong.
+
+`&& rm` instead of `; rm` repairs the signal deaths (exit 128+n) but not the ones that
+matter most: vanilla exits **0** after a Java-level crash, so an exception or a heap
+OOM still reads as a clean stop, and it newly breaks "typed `stop`, then SIGKILLed a
+hung JVM".
+
+The deeper objection is coverage. A pidfile only exists if *the panel built the launch
+line*, which excludes script mode, servers started by hand at the pane, and every
+su/sudo server — the cases `_observe_session()`, `_remember_run()` and `_java_under()`
+exist to serve — and it excludes them silently, a missing file being indistinguishable
+from a stop. It also re-imports a persisted flag with no owner: a file left by a reboot
+survives a hand-start and a hand-stop, and restarts a server the admin deliberately
+shut down. Reading the game's own log is the same move as reading `/proc/<pid>/cmdline`
+— take the evidence off the thing that was actually running.
+
+(If some future need really is "did the shell outlive java", `--pidFile` is the wrong
+tool for it anyway: `cd d && touch RUN && ./start.sh; rm -f RUN` gives the identical
+signal, works in script mode, and can live in the panel's own directory keyed by
+session. The PID number itself buys nothing.)
+
+Scope is deliberately **panel startup only**. Nothing supervises a running server; a
+crash at 3am stays down until someone starts it or the panel restarts. `_boot_time()`
+reads `btime` from `/proc/stat`, falling back to `sysctl -n kern.boottime`, and is
+cached — it cannot change while we run, and on macOS it costs a subprocess.
+
+## Backing up the world when a server stops
+
+The Server tab's second checkbox, **default off**, stored as `backup_on_stop`
+beside `start_policy` and for the same reason: it is a standing policy about a
+session rather than a fact about a game, and it has to be readable in the one
+situation where it applies — a server that has just stopped — without that read
+depending on anything the stopped server could have told us.
+
+There is deliberately **one trigger**: the running → stopped edge in
+`_observe_session()`. Not one in `/api/server/stop` and another for stops we
+merely noticed — the Stop button only asks the console to stop, and what it
+produces a moment later *is* that same edge, so hanging the backup off the edge
+covers the button, a `stop` typed at the pane, a crash and a `kill` with one
+piece of code. It also covers each of them at the only moment the world is
+complete and no longer being written; backing up from the endpoint would tar a
+world the server was still saving into.
+
+The edge is seen when status is polled, which every open page does every 5 s (the
+Overview's per-session fetches count too). With no page open nothing is observed
+at all, so a server that stops overnight is backed up when someone next opens the
+panel — late, but the world has been sitting still since, so it is the same
+archive. What is lost is the timestamp's meaning, and `_STOP_BACKUPS` records the
+real time. A panel restart clears `_LAST_RUNNING`, so a stop that happens across
+one is never noticed and never backed up: no edge, no false archive.
+
+`_stop_backup_pass()` requires a **confirmed** directory (`_confirmed_dir()`) —
+this writes a gigabyte, and the rule about not writing into a directory we only
+guessed applies most of all here. In practice the server running a moment ago is
+exactly what confirms it; the case that survives is the su/sudo server whose `cwd`
+we never got to read, and there the state says so rather than archiving whatever
+world happens to be under the pane's shell.
+
+The tar runs on its own thread — it is reached from `/api/server/status`, which
+every page polls, and a world takes as long as it takes. `_STOP_BACKUPS` holds
+`running` / `done` / `failed` / `skipped` per session, in memory only (it
+describes this panel's run; read back after a restart it would claim a backup for
+a stop nobody here saw), and rides along on the status poll the page is already
+making. Every outcome prints, for the same reason the start policy's do.
+
+Its note on the card carries that **state and nothing else** — what a backup is doing
+or did, plus a `problem` if the setting cannot work. No explanation of what the
+checkbox means: the label says it, and saying it twice buried the one line that has
+to be read, "Backing up the world now…", which is why Start is held. The label says
+"as an autosave" deliberately, because that is the consequence worth knowing rather
+than a description of the mechanism — see the naming note below.
+
+It is a `.policy-item` row like the start-policy options above it, full width and
+green when set, even though it is a checkbox rather than a radio. Different control,
+same kind of question — a standing policy about this session — so it reads as one
+group instead of two unrelated widgets that happen to sit together.
+
+While it runs, **Start and Worlds→Load are refused with 409**. Starting into the
+directory would have the server writing what tar is reading, producing a corrupt
+archive of a perfectly good world — the one failure this feature exists to
+prevent — and Load deletes that world outright. The Start button disables itself
+to match and the status card says why. A server started by hand at the pane can
+still race it; nothing here can stop that.
+
+Archives are named `world-<ts>-autosave.tgz`, the same as the autosave taken
+before a Load, because they are the same thing: a backup the panel took without
+being asked. That also means the Worlds page's **Delete all autosaves** sweeps
+them, which matters — this fires on *every* stop, and a nightly-restarted server
+accumulates one full world archive a day with no retention policy of its own.
+
+### `_archive_world()` and why it links rather than replaces
+
+The one place a world archive is written: the Worlds page's Save, the autosave
+before a Load, and the on-stop backup all come through it, so all three produce
+the same shape of file in the same place.
+
+Tar writes to a hidden `.tmp` first. A tar that dies half way — the panel killed
+mid-backup, a full disk — must not leave a truncated archive in the list looking
+loadable, because Load deletes the current world *before* extracting.
+
+The final name is then claimed with `os.link()`, not `os.replace()`. These names
+are second-resolution and they do collide: an automatic backup can land in the
+same second as a hand-pressed Save (it happened on the first test run of this
+feature, and `replace()` silently destroyed the older archive). `link()` fails
+instead, and the next free second is taken — bounded at 60 — so nothing is ever
+overwritten. A filesystem without hard links falls back to `replace()` behind an
+`os.path.exists()` check, which is the best a check alone can promise.
 
 ## Pane width, and why `capture-pane` needs `-J`
 
@@ -397,9 +680,11 @@ UI has to be able to tell them apart.
 
 The roster still resolves its own game dir per request, so this trap is unchanged
 here — but the panel store now records what it believes for each session, and the
-Server page's autostart note shows it. `vibepanel-state.json` is the quickest way to
-see whether the panel and the admin disagree about where a server lives, and a `dir`
-carrying `dir_confirmed: true` was read off a server that was actually running there.
+`/api/server/start-policy` reports it as `dir` / `dir_confirmed` (the Server page no
+longer prints it — see the start-policy section). `vibepanel-state.json` is the
+quickest way to see whether the panel and the admin disagree about where a server
+lives, and a `dir` carrying `dir_confirmed: true` was read off a server that was
+actually running there.
 
 Names are validated against `^[A-Za-z0-9_]{1,16}$` before ever reaching a console
 command; ban reasons go through `pane_text()` — see the section below.
@@ -411,10 +696,20 @@ command; ban reasons go through `pane_text()` — see the section below.
 stitching the tails of several files together would mean searching a history with holes
 in it, which is both slower and confusing to reason about.
 
-Log lines carry only `[HH:MM:SS]`, so dates are reconstructed: within one `latest.log`
-the clock runs forward (a restart rotates the file away), so each backwards jump is a
-midnight rollover. Count them, then date each hit by counting back from the file's
-mtime, which is the date of its last line.
+The read itself is `_read_log_tail()`, shared with `_last_run_ending()` — the two
+readers of this file want the same window and the same seek. It **raises** rather
+than swallowing `OSError`, because the start policy has to tell "no log here" from
+"could not read the log" and this scraper does not.
+
+Log lines carry only `[HH:MM:SS]`, so dates are reconstructed by counting each
+backwards clock jump as a midnight rollover, then dating each hit back from the
+file's mtime, which is the date of its last line. Note the premise that used to be
+stated here — "a restart rotates the file away, so a backwards jump can only be
+midnight" — is wrong in a way that happens not to matter: stock `log4j2.xml` carries
+`OnStartupTriggeringPolicy` **and** a `TimeBasedTriggeringPolicy` on a `yyyy-MM-dd`
+pattern, so the file also rotates at midnight mid-run and there is usually no
+rollover left to count. A config without the time-based trigger still produces one,
+which is why the counting stays.
 
 ## Geyser's Bedrock port
 
@@ -562,7 +857,7 @@ peaks are re-seeded from the next sample, so the button just calls `loadOverview
   mods/                # active Fabric mods                   (MODS_DIR)
   mods-saves/          # inactive/stashed mods                (MODS_SAVES_DIR)
   world-saves/         # .tgz world backups                   (WORLDS_DIR)
-  logs/latest.log      # scraped for player name→UUID suggestions (read-only)
+  logs/latest.log      # name→UUID suggestions, and how the last run ended (read-only)
   config/Geyser-Fabric/config.yml   # bedrock.port, if Geyser is installed (read-only)
   whitelist.json       # read + written by the Players page
   ops.json             #   "
@@ -576,7 +871,7 @@ And in the **panel's** own working directory, not the game dir:
 
 ```
 <panel-dir>/
-  vibepanel-state.json  # expected sessions, their game dirs, autostart flags
+  vibepanel-state.json  # expected sessions, their game dirs, start policies
 ```
 
 ## Multiple sessions share one DOM — two rules
@@ -603,6 +898,11 @@ for a conflict raised on the old one. When adding UI that holds a result, add it
 to `resetSessionUi()` in the same commit. Same goes for in-flight guard flags —
 `loadingPlayers` is reset there, otherwise a load still running for the old server
 makes the new one skip as "already loading" and the page sticks on Loading….
+
+**`title` attributes would count too**, if any per-session UI used one: a tooltip
+naming the previous server's jar and game directory is exactly as wrong as a stale
+visible line, and worse to notice, because nothing on screen looks out of date. The
+policy cards briefly carried one and it had to be cleared here like everything else.
 
 Per-session data that should survive a switch (rather than be cleared) is keyed by
 session name — see `sayHistory`, so a broadcast sent to one server reappears under
@@ -688,3 +988,16 @@ See `vibepanel.service` — drop it in `/etc/systemd/system/`, adjust `User` / `
 systemctl daemon-reload
 systemctl enable --now vibepanel
 ```
+
+**`KillMode=process` is not optional.** A tmux session that `_ensure_session()` created
+is a child of the panel and lands in the unit's cgroup — daemonizing does not escape
+one — so systemd's default `KillMode=control-group` SIGTERMs it on every
+`systemctl restart vibepanel`, taking the running game down with the panel. That was
+survivable while autostart was a bool, since the restart simply started the server
+again. Under `unless-stopped` it is not: the JVM's shutdown hook writes a clean
+shutdown to the log on the way out, the next pass reads that back as a deliberate
+signal kill on a live host, and the server stays down. A routine panel restart would
+stop the game permanently.
+
+It only bites sessions the *panel* created — one an admin started from their own login
+shell lives in a different cgroup — which is exactly the boot-time path.

@@ -466,7 +466,23 @@ def _load_panel_state() -> None:
     except (OSError, ValueError):
         data = {}
     sessions = data.get("sessions")
-    _PANEL_STATE = {"sessions": sessions if isinstance(sessions, dict) else {}}
+    sessions = sessions if isinstance(sessions, dict) else {}
+    # Each entry has to be a dict too, not just the map holding them:
+    # _session_state() copies one with dict(), which raises on anything else, so
+    # a single hand-mangled entry would otherwise take out every read of the
+    # store rather than just its own session.
+    _PANEL_STATE = {"sessions": {k: v for k, v in sessions.items()
+                                 if isinstance(v, dict)}}
+
+    # autostart (a bool) became start_policy (one of three). Migrate in memory and
+    # pop the old key rather than leaving both: this file is the quickest way to
+    # see what the panel believes, and two keys that can disagree destroy that.
+    # No write is needed here — _set_expected_sessions() runs moments later and
+    # flushes unconditionally, so the new shape lands on disk for free.
+    for entry in _PANEL_STATE["sessions"].values():
+        if "autostart" in entry:
+            entry.setdefault("start_policy",
+                             "always" if entry.pop("autostart") else "never")
 
 
 def _write_panel_state_locked() -> None:
@@ -502,6 +518,27 @@ def _confirmed_dir(session: str) -> str | None:
     """
     st = _session_state(session)
     return st.get("dir") if st.get("dir_confirmed") else None
+
+
+# What the panel does with a server when the panel process starts.
+#
+#   never           nothing, ever. The default, and what an unrecognised value
+#                   falls back to.
+#   always          start it, whatever happened last time.
+#   unless-stopped  start it unless the last run was asked to stop — see
+#                   _last_run_ending(), which reads that off the game's own log.
+_START_POLICIES = ("never", "always", "unless-stopped")
+
+
+def _start_policy(session: str) -> str:
+    """This session's start policy, defaulting to "never".
+
+    Whitelisted on the way out, like _last_mode(): a store that has been hand
+    edited, or written by a newer panel, must never read as something *stronger*
+    than the admin asked for. Unknown means the panel leaves the server alone.
+    """
+    policy = _session_state(session).get("start_policy")
+    return policy if policy in _START_POLICIES else "never"
 
 
 def _update_session_state(session: str, **fields) -> bool:
@@ -764,6 +801,208 @@ def _running_game_dir(target: str, pid: int, allow_pane: bool = True) -> str | N
         return None
 
 
+# ── Backing up the world when a server stops ─────────────────────────────────
+#
+# A per-server standing policy, like the start policy and stored beside it: ticked
+# means every running → stopped transition archives the world, whoever caused
+# the stop. There is deliberately only *one* trigger — the running → stopped
+# edge in _observe_session() — rather than one in /api/server/stop and another
+# for stops we merely noticed. The Stop button only asks the console to stop;
+# what it produces a moment later is that same edge, so hanging the backup off
+# the edge covers the button, a `stop` typed at the pane, a crash and a kill
+# with one piece of code, and covers each of them at the only moment the world
+# is actually at rest. Backing up from the endpoint would tar a world the
+# server was still writing.
+#
+# The edge is seen when status is polled, which every open page does every 5 s.
+# With no page open nothing is observed at all, so a server that stops overnight
+# is backed up when someone next opens the panel — late, but from a world that
+# has been sitting still since, so the archive is the same one. What is lost is
+# only the timestamp's meaning, and _STOP_BACKUPS records the real one.
+
+# What the last stop-backup did, per session, for the Server page to show:
+#   {session: {"state": "running"|"done"|"failed"|"skipped", "filename": …,
+#              "size": …, "error": …, "at": "HH:MM:SS"}}
+# In memory only: it describes this panel's run, and a stale line read back
+# after a restart would claim a backup for a stop nobody here saw.
+_STOP_BACKUPS     = {}
+_STOP_BACKUP_LOCK = threading.Lock()
+
+
+def _archive_world(gdir: str, suffix: str = None) -> tuple:
+    """Tar <gdir>/world into WORLDS_DIR as world-<ts>[-<suffix>].tgz.
+
+    The one place a world archive is written — the Worlds page's Save, the
+    autosave before a Load, and the on-stop backup all come through here, so
+    all three produce the same shape of file in the same place.
+
+    Tarred to a hidden `.tmp` and only then linked into place, the same
+    discipline as the state files: a tar that dies half way — the panel killed
+    mid-backup, a full disk — must not leave a truncated archive sitting in the
+    list looking loadable, because Load deletes the current world before
+    extracting one.
+
+    The name is claimed with os.link() rather than os.replace() because these
+    names collide: they are second-resolution, and an automatic backup can land
+    in the same second as a hand-pressed Save or the autosave before a Load.
+    replace() would silently destroy the older archive — the one failure this
+    whole feature exists to prevent — so instead the link fails, and we take the
+    next free second. Nothing is ever overwritten.
+
+    Raises FileNotFoundError when there is no world to archive, and
+    CalledProcessError when tar fails. Returns (filename, size).
+    """
+    world_path = os.path.join(gdir, "world")
+    if not os.path.isdir(world_path):
+        raise FileNotFoundError("No 'world' directory found")
+
+    saves_path = os.path.join(gdir, WORLDS_DIR)
+    os.makedirs(saves_path, exist_ok=True)
+
+    stamp    = datetime.now()
+    def named(when):
+        ts = when.strftime("%Y%m%d-%H%M%S")
+        return f"world-{ts}-{suffix}.tgz" if suffix else f"world-{ts}.tgz"
+
+    # Hidden, and made unique by writer rather than by name: the whole reason
+    # for the loop below is that two archivings can pick the same name in the
+    # same second, and those two must not then also share a scratch file and tar
+    # over each other. The server is stopped while an on-stop backup runs, so
+    # the Worlds page's Save is live at the time and this overlap is reachable.
+    tmp_path = os.path.join(
+        saves_path, f".world-{os.getpid()}-{threading.get_ident()}.tgz.tmp")
+    try:
+        subprocess.run(
+            ["tar", "-czf", tmp_path, "-C", gdir, "world"],
+            check=True, capture_output=True, text=True,
+        )
+        for _ in range(60):
+            filename = named(stamp)
+            out_path = os.path.join(saves_path, filename)
+            try:
+                os.link(tmp_path, out_path)
+                break
+            except FileExistsError:
+                stamp += timedelta(seconds=1)
+            except OSError:
+                # A filesystem without hard links. Fall back to the rename, and
+                # keep the no-clobber promise as best a check can.
+                if os.path.exists(out_path):
+                    stamp += timedelta(seconds=1)
+                    continue
+                os.replace(tmp_path, out_path)
+                break
+        else:
+            raise FileExistsError(f"no free name for {named(stamp)}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    return filename, os.path.getsize(out_path)
+
+
+def _stop_backup_state(session: str) -> dict:
+    with _STOP_BACKUP_LOCK:
+        st = _STOP_BACKUPS.get(session)
+        return dict(st) if st else None
+
+
+def _stop_backup_running(session: str) -> bool:
+    """Whether a stop-backup is tarring this session's world right now.
+
+    Callers that would disturb the directory being read — Start, and the Worlds
+    page's Load — check this and refuse for the moment. A tar of a world the
+    server has begun writing again is a corrupt archive of a fine world, which
+    is worse than the archive simply not existing.
+    """
+    st = _stop_backup_state(session)
+    return bool(st and st.get("state") == "running")
+
+
+def _run_stop_backup(session: str, gdir: str) -> None:
+    """Tar the world, then record what happened. Runs on its own thread.
+
+    A world is gigabytes and tar takes as long as it takes; this is reached from
+    /api/server/status, which every page polls, so it cannot be done inline.
+    Every outcome is printed and kept, for the same reason the start policy
+    prints:
+    somebody who finds an archive they did not ask for should be able to see in
+    the panel's log that the panel made it.
+    """
+    try:
+        filename, size = _archive_world(gdir, "autosave")
+        with _STOP_BACKUP_LOCK:
+            _STOP_BACKUPS[session] = {
+                "state": "done", "filename": filename, "size": size,
+                "at": datetime.now().strftime("%H:%M:%S"),
+            }
+        print(f"stop-backup: '{session}' wrote {filename} ({size} bytes) in {gdir}")
+    except Exception as e:
+        error = getattr(e, "stderr", None) or str(e)
+        with _STOP_BACKUP_LOCK:
+            _STOP_BACKUPS[session] = {
+                "state": "failed", "error": error,
+                "at": datetime.now().strftime("%H:%M:%S"),
+            }
+        print(f"stop-backup: '{session}' failed — {error}")
+
+
+def _stop_backup_pass(session: str) -> None:
+    """Start a backup for a session that has just stopped, if it asked for one.
+
+    The directory must be a *confirmed* one: this writes files, and an
+    unconfirmed dir is a pane's CWD, which is a fine guess to show and a poor
+    place to leave a gigabyte. In practice the server was running a moment ago,
+    which is exactly what confirms it — the case that survives is the su/sudo
+    server whose cwd we never got to read, and there we say so rather than
+    archiving some other directory's world.
+    """
+    if not _session_state(session).get("backup_on_stop"):
+        return
+
+    gdir = _confirmed_dir(session)
+    if not gdir:
+        with _STOP_BACKUP_LOCK:
+            _STOP_BACKUPS[session] = {
+                "state": "skipped",
+                "error": "the panel has not confirmed this server's game directory",
+                "at": datetime.now().strftime("%H:%M:%S"),
+            }
+        print(f"stop-backup: '{session}' skipped — game directory not confirmed")
+        return
+
+    with _STOP_BACKUP_LOCK:
+        if (_STOP_BACKUPS.get(session) or {}).get("state") == "running":
+            return
+        _STOP_BACKUPS[session] = {"state": "running",
+                                  "at": datetime.now().strftime("%H:%M:%S")}
+    print(f"stop-backup: '{session}' backing up the world in {gdir}")
+    threading.Thread(target=_run_stop_backup, args=(session, gdir),
+                     daemon=True).start()
+
+
+def _stop_backup_plan(session: str) -> dict:
+    """The policy and whether it could be carried out, for the Server page.
+
+    Same shape as _start_plan(): report a broken link as itself, so an admin
+    who ticked the box and got nothing can see which step is missing rather than
+    an empty world-saves directory.
+    """
+    st   = _session_state(session)
+    plan = {"backup_on_stop": bool(st.get("backup_on_stop")),
+            "dir": st.get("dir"), "dir_confirmed": bool(st.get("dir_confirmed")),
+            "last": _stop_backup_state(session), "problem": None}
+
+    gdir = _confirmed_dir(session)
+    if not gdir:
+        plan["problem"] = ("the game directory is not confirmed yet — it is, the "
+                           "first time the panel sees this server running")
+    elif not os.path.isdir(os.path.join(gdir, "world")):
+        plan["problem"] = f"there is no 'world' directory in {gdir} yet"
+    return plan
+
+
 def _observe_session(target: str, info: dict, ensured: str = None) -> None:
     """Learn where a session's game directory is, by watching it.
 
@@ -823,7 +1062,16 @@ def _observe_session(target: str, info: dict, ensured: str = None) -> None:
                               last_jar=info.get("jar"), last_mem=info.get("mem"))
             return
 
-        # Stopped. Track the pane while the directory is still only a guess.
+        # Stopped. The edge into it is the one moment the world is both complete
+        # and no longer being written, so it is where the backup goes — and it
+        # is the same edge whether the Stop button caused it, someone typed
+        # `stop` at the pane, or the JVM died on its own. Before the dir checks
+        # below, which are about *learning* a directory; this one needs an
+        # already-confirmed dir and takes no guesses.
+        if was is True:
+            _stop_backup_pass(session)
+
+        # Track the pane while the directory is still only a guess.
         if _session_state(session).get("dir_confirmed"):
             return
         gdir = _game_dir(target, ensured)
@@ -1091,27 +1339,40 @@ def _read_bedrock_port(gdir: str) -> int:
     return None
 
 
+def _read_log_tail(gdir: str) -> tuple:
+    """The last LOG_SCAN_MAX_BYTES of logs/latest.log, and the file's mtime.
+
+    Raises OSError rather than swallowing it: _last_run_ending() needs to tell
+    "there is no log here" from "there is one and we could not read it", and
+    those are different answers.
+    """
+    path = os.path.join(gdir, LOGS_DIR, LATEST_LOG)
+    mtime = os.path.getmtime(path)
+    with open(path, "rb") as fh:
+        size = os.fstat(fh.fileno()).st_size
+        if size > LOG_SCAN_MAX_BYTES:
+            fh.seek(size - LOG_SCAN_MAX_BYTES)
+        return fh.read().decode("utf-8", "replace"), mtime
+
+
 def _scan_latest_log(gdir: str) -> list:
     """Scrape name→UUID pairs from the tail of logs/latest.log.
 
     Reads at most LOG_SCAN_MAX_BYTES from the end of that one file — no rotated
     archives — so the result is one contiguous slice of history.
     """
-    path = os.path.join(gdir, LOGS_DIR, LATEST_LOG)
     try:
-        mtime = os.path.getmtime(path)
-        with open(path, "rb") as fh:
-            size = os.fstat(fh.fileno()).st_size
-            if size > LOG_SCAN_MAX_BYTES:
-                fh.seek(size - LOG_SCAN_MAX_BYTES)
-            blob = fh.read().decode("utf-8", "replace")
+        blob, mtime = _read_log_tail(gdir)
     except OSError:
         return []
 
-    # Log lines carry only [HH:MM:SS]. Within a single latest.log the clock runs
-    # forward (a restart rotates the old file away), so every backwards jump is a
-    # midnight rollover: count them, then date each hit by counting back from the
-    # file's mtime, which is the date of its last line.
+    # Log lines carry only [HH:MM:SS], so dates are reconstructed by counting
+    # backwards clock jumps as midnight rollovers and dating each hit back from
+    # the file's mtime, which is the date of its last line. Note the file is
+    # rotated both at server start *and* at midnight (log4j2.xml carries
+    # OnStartupTriggeringPolicy and a TimeBasedTriggeringPolicy on a yyyy-MM-dd
+    # pattern), so on a stock config there is rarely a rollover to count — but a
+    # config without the time-based trigger can still produce one.
     hits, day, stamp = [], 0, None
     for line in blob.splitlines():
         t = _LOG_LINE_TIME_RE.match(line)
@@ -1452,18 +1713,23 @@ def api_server_status():
     page polls it, for every session, so it sees the stopped → running edge that
     _observe_session() needs.
     """
-    target = _session_target()
+    target  = _session_target()
+    session = target.split(":")[0]
+    # A stop-backup is started by the observation just above and then runs for
+    # minutes on its own thread, so its state rides along on the poll that every
+    # page is already making rather than needing one of its own.
     try:
         info = _pane_java_info(target)
         _observe_session(target, info)
-        return jsonify({**info, "ok": True})
+        return jsonify({**info, "ok": True, "stop_backup": _stop_backup_state(session)})
     except subprocess.CalledProcessError:
         ensured = _ensure_session(target)
         if ensured != "failed":
             try:
                 info = _pane_java_info(target)
                 _observe_session(target, info, ensured)
-                return jsonify({**info, "ok": True})
+                return jsonify({**info, "ok": True,
+                                "stop_backup": _stop_backup_state(session)})
             except subprocess.CalledProcessError:
                 pass    # a target naming a window/pane we did not create
         return jsonify({"running": False, "ok": False,
@@ -1782,8 +2048,8 @@ def _start_server(target: str, gdir: str, jar: str = None, mem: str = None,
                   mode: str = "jar", script: str = None) -> str:
     """Type a start command into the session's pane. Returns what it launched.
 
-    The single start path: the Start button and the autostart pass both come
-    through here, so what happens at boot is exactly what happens on a click.
+    The single start path: the Start button and the startup policy pass both
+    come through here, so what happens at boot is exactly what happens on a click.
     Raises StartError for anything refused.
 
     Two mutually exclusive forms, and `mode` picks one rather than the presence
@@ -1850,6 +2116,15 @@ def _start_server(target: str, gdir: str, jar: str = None, mem: str = None,
     if _is_running(target):
         raise StartError("Server is already running", 409)
 
+    # The world is being tarred right now, following the stop that just
+    # happened. Starting into it would have the server writing the directory
+    # tar is reading, and the archive — the whole point of the backup — would be
+    # a broken copy of a perfectly good world. It is a wait of seconds to
+    # minutes, not a refusal: the Start button comes back by itself.
+    if _stop_backup_running(target.split(":")[0]):
+        raise StartError("Backing up the world after the last stop — "
+                         "try again when it finishes", 409)
+
     # This used to create the session with `cmd` as its process when one was
     # missing, which tied the session's life to the server's: stopping the
     # server took the pane with it, and the panel reads that pane afterwards.
@@ -1860,7 +2135,7 @@ def _start_server(target: str, gdir: str, jar: str = None, mem: str = None,
     tmux_send(cmd, target)
     # Remember on start, not just on stop, so stops that happen outside the
     # panel (console 'stop', a crash) still leave a sensible default behind —
-    # and so autostart knows what to launch and with how much.
+    # and so the startup pass knows what to launch and with how much.
     _remember_run(gdir, target.split(":")[0], **remember)
     return launched
 
@@ -1895,8 +2170,186 @@ def api_server_start():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-def _autostart_plan(session: str) -> dict:
-    """What autostart would do for a session, and what it knows.
+# ── How the last run ended, and whether to bring it back ─────────────────────
+#
+# This is what "unless-stopped" is made of. It has to work whether or not the
+# panel's Stop button was used and whether or not any page was open to watch, so
+# it cannot lean on _LAST_RUNNING — that is in memory, is wiped by a panel
+# restart, and only advances when somebody polls. It reads the evidence the
+# stopped server left behind instead: the tail of its own log.
+#
+# Minecraft writes two different lines on the way down, and they mean different
+# things:
+#
+#   "Stopping the server"   the /stop *command's* own feedback (lang key
+#                           commands.stop.stopping, through sendSuccess) — so
+#                           somebody asked for this
+#   "Stopping server"       MinecraftServer.stopServer(), on the way out of the
+#                           run loop — an orderly shutdown happened, and the line
+#                           says nothing at all about who caused it
+#
+# A SIGTERM at host shutdown runs the shutdown hook, so it produces the second
+# and never the first. That difference is the whole discriminator, and it is
+# *content* rather than timing — which is why it still gets "stopped, then
+# rebooted three hours later" right, where any grace window would fail.
+#
+# The strong line is matched against the message *body*, anchored. latest.log
+# carries chat, so a substring test fires on a player typing "Stopping the
+# server" — which would let anyone on the server pin it down permanently. The
+# optional bracket group admits the wrapped forms a non-console command source
+# produces: "[Rcon: Stopping the server]", "[Notch: Stopping the server]".
+#
+# Note "All dimensions are saved" is deliberately *not* a marker: `/save-all
+# flush` takes the same branch, and backup plugins run it on a timer, so a crash
+# after one would read as a deliberate stop.
+_STOP_ASKED_RE = re.compile(r'^(?:\[[^\[\]]{1,64}: )?Stopping the server\.{0,3}\]?$')
+_STOP_ORDERLY  = "Stopping server"
+_RUN_STARTED   = "Starting minecraft server version"
+
+# A crash is *also* an orderly shutdown, which is the trap here: runServer()
+# catches Throwable, writes the crash report, and then its `finally` calls
+# stopServer() — which logs "Stopping server" unconditionally. So a heap OOM at
+# 3am looks exactly like a `kill` on a live host unless we notice the wreckage
+# above it, and the panel would refuse to restart a crashed server while
+# reporting that somebody signalled it.
+#
+# Vanilla also exits 0 in that case (there is no System.exit in MinecraftServer),
+# so the exit status cannot tell us either — the log is the only witness.
+_CRASH_MARKERS = (
+    "Encountered an unexpected exception",                     # the fatal catch
+    "Considering it to be crashed, server will forcibly shutdown",  # ServerWatchdog
+)
+
+_BOOT_TIME      = None
+_BOOT_TIME_READ = False
+
+
+def _boot_time() -> float | None:
+    """When this host last booted, as a unix timestamp, or None if we cannot tell.
+
+    Cached: it cannot change while we run, and on macOS it costs a subprocess.
+    Read without a new dependency, the same rule _disk_usage() follows.
+    """
+    global _BOOT_TIME, _BOOT_TIME_READ
+    if _BOOT_TIME_READ:
+        return _BOOT_TIME
+    _BOOT_TIME_READ = True
+    try:
+        with open("/proc/stat") as fh:
+            for line in fh:
+                if line.startswith("btime "):
+                    _BOOT_TIME = float(line.split()[1])
+                    return _BOOT_TIME
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        # macOS: "{ sec = 1755300000, usec = 123456 } Sat Aug 16 09:00:00 2025"
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                             capture_output=True, text=True, timeout=5).stdout
+        hit = re.search(r'sec\s*=\s*(\d+)', out)
+        if hit:
+            _BOOT_TIME = float(hit.group(1))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return _BOOT_TIME
+
+
+def _last_run_ending(gdir: str) -> tuple:
+    """How the last run in this game dir ended, and when. See the note above.
+
+        "asked"       a /stop was issued — the Stop button, a console stop or
+                      rcon; all three log the same line
+        "crashed"     it died of its own accord and said so: an exception, or
+                      the watchdog giving up on a hung tick
+        "orderly"     it shut down cleanly and nothing asked it to: a signal
+        "crash"       it simply stopped, saying nothing: SIGKILL, an OOM kill,
+                      power loss
+        "absent"      no logs/latest.log — nothing has run here
+        "unreadable"  there is one, and we could not read it
+
+    Ranked asked > crashed > orderly, because a crash logs the orderly line too
+    (see _CRASH_MARKERS) and a run whose operator typed `stop` and *then* hit an
+    exception on the way down was still asked to stop.
+
+    The scan runs forward and lets the *last* verdict win, resetting at each
+    "Starting minecraft server version". latest.log normally rotates away at the
+    next server start, but that is a log4j config an admin can change, and a
+    stale marker left by the previous run would otherwise report this run's crash
+    as deliberate. "What does the end of this log say happened last" is true
+    however many runs share the file.
+    """
+    try:
+        blob, mtime = _read_log_tail(gdir)
+    except FileNotFoundError:
+        return "absent", None
+    except OSError:
+        return "unreadable", None
+
+    asked = orderly = crashed = False
+    for line in blob.splitlines():
+        # Vanilla's "[12:34:56] [Server thread/INFO]: msg" and Forge's longer
+        # "[12:34:56] [Server thread/INFO] [net.minecraft…/]: msg" both put the
+        # message after the first "]: " — the timestamp is followed by " [".
+        msg = line.partition("]: ")[2]
+        if msg.startswith(_RUN_STARTED):
+            asked = orderly = crashed = False
+        elif _STOP_ASKED_RE.match(msg):
+            asked = True
+        elif msg == _STOP_ORDERLY:
+            orderly = True
+        elif msg.startswith(_CRASH_MARKERS):
+            crashed = True
+
+    return ("asked" if asked else "crashed" if crashed else
+            "orderly" if orderly else "crash"), mtime
+
+
+def _log_when(mtime) -> str:
+    """" on 15 Aug at 21:04", for a sentence, or "" if we have no timestamp."""
+    return datetime.fromtimestamp(mtime).strftime(" on %d %b at %H:%M") if mtime else ""
+
+
+def _would_restart(gdir: str) -> tuple:
+    """Whether "unless-stopped" would start this server, and why, in one sentence.
+
+    The verdict and the words come out of the same place on purpose: the line
+    printed at boot and the note on the Server page must never explain the panel
+    two different ways.
+    """
+    ending, mtime = _last_run_ending(gdir)
+
+    if ending == "asked":
+        return False, f"the last run was asked to stop{_log_when(mtime)}"
+    if ending == "unreadable":
+        # The direction that surprises nobody. A disk that did not come back is
+        # not evidence that the admin wanted this server up.
+        return False, "the game's log could not be read, so how it last ended is unknown"
+    if ending == "absent":
+        return True, "there is no log of a previous run here"
+    if ending == "crashed":
+        # Named separately from the silent case below. "It crashed" is the one
+        # thing on this card an admin will act on, and it is worth saying rather
+        # than leaving them to infer it from "ended without being asked to".
+        return True, f"the last run crashed{_log_when(mtime)}"
+    if ending == "crash":
+        return True, f"the last run ended without being asked to{_log_when(mtime)}"
+
+    # Orderly, but nothing asked for it — so a signal. Which one is settled by
+    # whether it landed inside this boot: a run that ended *before* the machine
+    # came up was ended by the machine going down, and that is exactly the case
+    # to come back from. One that ended while the host was up was killed by hand
+    # (`kill`, `tmux kill-session`, a service manager), which is deliberate.
+    boot = _boot_time()
+    if boot is None:
+        return False, (f"the last run shut down cleanly{_log_when(mtime)} and this "
+                       f"host's boot time is unknown")
+    if mtime < boot:
+        return True, "the last run was still going when the host went down"
+    return False, f"the last run was shut down by a signal{_log_when(mtime)}"
+
+
+def _start_chain(plan: dict, session: str) -> str | None:
+    """Fill in what the panel would start for a session; return what is missing.
 
     The chain is panel store → dir → the game dir's .vibepanel.json → the start
     form it last used, so a broken link is reported as itself rather than as a
@@ -1907,18 +2360,10 @@ def _autostart_plan(session: str) -> dict:
     start.sh that lost its +x, or was renamed, is a boot-time failure worth
     seeing on the Server page now instead of discovering after a reboot.
     """
-    st   = _session_state(session)
-    plan = {"autostart": bool(st.get("autostart")),
-            "dir": st.get("dir"), "dir_confirmed": bool(st.get("dir_confirmed")),
-            "mode": "jar", "jar": None, "mem": None, "script": None,
-            "problem": None}
-
     if not plan["dir"]:
-        plan["problem"] = "no game directory known for this session yet"
-        return plan
+        return "no game directory known for this session yet"
     if not os.path.isdir(plan["dir"]):
-        plan["problem"] = f"game directory is not readable: {plan['dir']}"
-        return plan
+        return f"game directory is not readable: {plan['dir']}"
 
     plan["mode"] = _last_mode(plan["dir"], session)
     if plan["mode"] == "script":
@@ -1926,74 +2371,144 @@ def _autostart_plan(session: str) -> dict:
         try:
             _resolve_start_script(plan["dir"], plan["script"] or "")
         except StartError as e:
-            plan["problem"] = (str(e) if plan["script"] else
-                               "no start script remembered — start this server "
-                               "from the panel once")
-        return plan
+            return (str(e) if plan["script"] else
+                    "no start script remembered — start this server "
+                    "from the panel once")
+        return None
 
     plan["jar"] = _last_jar(plan["dir"], session)
     plan["mem"] = _last_mem(plan["dir"], session) or "1024M"
     if not plan["jar"]:
-        plan["problem"] = "no jar remembered — start this server from the panel once"
+        return "no jar remembered — start this server from the panel once"
+    return None
+
+
+def _start_plan(session: str) -> dict:
+    """What the panel would do with this session when it next starts, and why.
+
+    `problem` and `reason` answer different questions and both are wanted:
+    `problem` is a broken link in the chain — something to go and fix — while
+    `reason` is the policy's own account of the decision, which under
+    "unless-stopped" is a reading of how the last run ended. A server set to
+    "never" still reports a missing jar, because that is worth fixing before the
+    admin changes their mind.
+
+    `would_start`, not `will_start`: this is what the policy and the evidence
+    come to, and it deliberately does not consult whether the server is running.
+    That check belongs to _start_policy_pass() alone — it is the one thing there
+    that is not policy — and asking tmux here would spend a round trip on every
+    page load answering a question the page never asks.
+    """
+    st   = _session_state(session)
+    plan = {"start_policy": _start_policy(session),
+            "dir": st.get("dir"), "dir_confirmed": bool(st.get("dir_confirmed")),
+            "mode": "jar", "jar": None, "mem": None, "script": None,
+            "problem": None, "would_start": False, "reason": ""}
+
+    plan["problem"] = _start_chain(plan, session)
+
+    if plan["start_policy"] == "never":
+        plan["reason"] = "this server is never started by the panel"
+    elif plan["problem"]:
+        plan["reason"] = plan["problem"]
+    elif plan["start_policy"] == "always":
+        plan["would_start"] = True
+        plan["reason"] = "set to start whenever the panel does"
+    else:
+        # Only this policy pays for the log read, and only it shows a reason
+        # drawn from evidence the other two ignore.
+        plan["would_start"], plan["reason"] = _would_restart(plan["dir"])
     return plan
 
 
-def _autostart_pass() -> None:
-    """Start every session whose checkbox is ticked. Called once, at startup.
+def _start_policy_pass() -> None:
+    """Act on every session's start policy. Called once, at startup.
 
-    The checkbox is the only trigger: nothing here consults whether the server
-    was running before, why the panel started, or how long the machine has been
-    up. Ticked means it starts whenever the panel process starts; unticked means
-    nothing ever happens. An admin who ticked it owns the consequence, and one
-    who did not is never surprised.
+    Nothing here infers anything the policy did not say: not why the panel
+    started, not how long the host has been up. "always" starts it, "never" does
+    nothing ever, and "unless-stopped" asks _would_restart() to read the game's
+    log — an admin who chose one of them owns the consequence.
 
-    Every outcome prints. Somebody who finds a server running must be able to see
-    in the panel's own log that the panel did it, and why.
+    Every outcome prints, "never" included. One line per session makes the
+    panel's own log a complete account of what it decided at boot, which is what
+    somebody who finds a server running — or finds one that did not come back —
+    needs to be able to read.
 
-    Sessions are independent — one failing must not stop the others.
+    Sessions are independent: one failing must not stop the others.
     """
     for target in SESSIONS:
         session = target.split(":")[0]
-        plan = _autostart_plan(session)
-        if not plan["autostart"]:
-            continue
         try:
+            plan = _start_plan(session)
+            if plan["start_policy"] == "never":
+                print(f"start policy: '{session}' — {plan['reason']}")
+                continue
             # Not a policy check: `systemctl restart vibepanel` on a healthy host
             # must not type a second JVM into a running server's pane.
             if _is_running(target):
-                print(f"autostart: '{session}' is already running — left alone")
+                print(f"start policy: '{session}' is already running — left alone")
                 continue
-            if plan["problem"]:
-                print(f"autostart: '{session}' skipped — {plan['problem']}")
+            if not plan["would_start"]:
+                print(f"start policy: '{session}' not started — {plan['reason']}")
                 continue
             _start_server(target, plan["dir"], plan["jar"], plan["mem"],
                           mode=plan["mode"], script=plan["script"])
             what = (f"./{plan['script']}" if plan["mode"] == "script"
                     else f"{plan['jar']} with {plan['mem']}")
-            print(f"autostart: '{session}' starting {what} in {plan['dir']}")
+            print(f"start policy: '{session}' starting {what} in {plan['dir']} "
+                  f"— {plan['reason']}")
         except Exception as e:
-            print(f"autostart: '{session}' failed — {e}")
+            print(f"start policy: '{session}' failed — {e}")
 
 
-@app.route("/api/server/autostart")
-def api_server_autostart_get():
-    return jsonify({"ok": True, **_autostart_plan(_session_target().split(":")[0])})
+@app.route("/api/server/start-policy")
+def api_server_start_policy_get():
+    return jsonify({"ok": True, **_start_plan(_session_target().split(":")[0])})
 
 
-@app.route("/api/server/autostart", methods=["POST"])
-def api_server_autostart_set():
-    """Turn the per-server 'start when the panel starts' flag on or off.
+@app.route("/api/server/start-policy", methods=["POST"])
+def api_server_start_policy_set():
+    """Set what the panel does with this server when the panel starts.
 
     Lives in the panel store rather than the game dir, so reading it never
-    depends on resolving a directory first — which is exactly the condition
-    autostart runs under, before any session is guaranteed to exist.
+    depends on resolving a directory first — which is exactly the condition the
+    startup pass runs under, before any session is guaranteed to exist.
+
+    Validated against _START_POLICIES here as well as on the way out, so the
+    store never holds a value the reader would then have to refuse.
     """
     session = _session_target().split(":")[0]
     data = request.get_json(force=True, silent=True) or {}
-    if not isinstance(data.get("autostart"), bool):
-        return jsonify({"ok": False, "error": "autostart must be true or false"}), 400
-    _update_session_state(session, autostart=data["autostart"])
-    return jsonify({"ok": True, **_autostart_plan(session)})
+    policy = data.get("start_policy")
+    if policy not in _START_POLICIES:
+        return jsonify({"ok": False,
+                        "error": "start_policy must be one of "
+                                 + ", ".join(_START_POLICIES)}), 400
+    _update_session_state(session, start_policy=policy)
+    return jsonify({"ok": True, **_start_plan(session)})
+
+
+@app.route("/api/server/backup-on-stop")
+def api_server_backup_on_stop_get():
+    return jsonify({"ok": True, **_stop_backup_plan(_session_target().split(":")[0])})
+
+
+@app.route("/api/server/backup-on-stop", methods=["POST"])
+def api_server_backup_on_stop_set():
+    """Set whether stopping this server archives its world.
+
+    In the panel store beside the start policy, and for the same reason: it is a
+    standing policy about a session rather than a fact about a game, and the
+    panel has to be able to read it in the one situation where it applies —
+    a server that has just stopped — without that read depending on anything
+    the stopped server can no longer tell it.
+    """
+    session = _session_target().split(":")[0]
+    data = request.get_json(force=True, silent=True) or {}
+    if not isinstance(data.get("backup_on_stop"), bool):
+        return jsonify({"ok": False, "error": "backup_on_stop must be true or false"}), 400
+    _update_session_state(session, backup_on_stop=data["backup_on_stop"])
+    return jsonify({"ok": True, **_stop_backup_plan(session)})
 
 
 @app.route("/api/server/stop", methods=["POST"])
@@ -2216,23 +2731,11 @@ def api_worlds_save():
     except subprocess.CalledProcessError:
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
-    world_path = os.path.join(gdir, "world")
-    if not os.path.isdir(world_path):
-        return jsonify({"ok": False, "error": "No 'world' directory found"}), 404
-
-    saves_path = os.path.join(gdir, WORLDS_DIR)
-    os.makedirs(saves_path, exist_ok=True)
-
-    ts       = datetime.now().strftime("%Y%m%d-%H%M%S")
-    filename = f"world-{ts}-{name}.tgz" if name else f"world-{ts}.tgz"
-    out_path = os.path.join(saves_path, filename)
-
     try:
-        subprocess.run(
-            ["tar", "-czf", out_path, "-C", gdir, "world"],
-            check=True, capture_output=True, text=True,
-        )
-        return jsonify({"ok": True, "filename": filename, "size": os.path.getsize(out_path)})
+        filename, size = _archive_world(gdir, name or None)
+        return jsonify({"ok": True, "filename": filename, "size": size})
+    except FileNotFoundError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": e.stderr or str(e)}), 500
     except Exception as e:
@@ -2245,6 +2748,14 @@ def api_worlds_load():
     target = _session_target()
     if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before loading a world"}), 409
+    # Load deletes the current world, and the on-stop backup may still be
+    # reading it — that would leave the backup a truncated archive of the world
+    # it was meant to preserve, at the exact moment the world itself is being
+    # replaced. Wait for it.
+    if _stop_backup_running(target.split(":")[0]):
+        return jsonify({"ok": False,
+                        "error": "Backing up the world after the last stop — "
+                                 "try again when it finishes"}), 409
 
     data     = request.get_json(force=True, silent=True) or {}
     filename = str(data.get("filename", "")).strip()
@@ -2266,17 +2777,12 @@ def api_worlds_load():
     autosaved  = None
 
     if os.path.isdir(world_path):
-        os.makedirs(saves_path, exist_ok=True)
-        ts        = datetime.now().strftime("%Y%m%d-%H%M%S")
-        autosaved = f"world-{ts}-autosave.tgz"
-        auto_path = os.path.join(saves_path, autosaved)
         try:
-            subprocess.run(
-                ["tar", "-czf", auto_path, "-C", gdir, "world"],
-                check=True, capture_output=True, text=True,
-            )
+            autosaved, _ = _archive_world(gdir, "autosave")
         except subprocess.CalledProcessError as e:
             return jsonify({"ok": False, "error": f"Autosave failed: {e.stderr or str(e)}"}), 500
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Autosave failed: {e}"}), 500
         try:
             shutil.rmtree(world_path)
         except Exception as e:
@@ -2672,7 +3178,7 @@ if __name__ == "__main__":
             print(f"session '{s.split(':')[0]}': {st['dir']}"
                   + ("" if st.get("dir_confirmed") else "  (unconfirmed)"))
 
-    _autostart_pass()
+    _start_policy_pass()
 
     session_display = ', '.join(SESSIONS)
     print(f"VibePanel starting on http://{args.host}:{args.port}  "

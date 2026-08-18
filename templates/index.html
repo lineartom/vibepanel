@@ -106,23 +106,22 @@
         <div id="srv-motd" class="srv-motd"></div>
       </div>
 
+      <!-- Start is what this page is for, so it sits between the banner and the
+           status rather than below the whole start form. The fields it reads
+           still live down there; you just should not have to scroll past them
+           to press it. Outside #srv-identity on purpose — that card hides for a
+           server with no icon or motd, and the action must not vanish with it. -->
+      <button id="btn-start" class="btn btn-primary btn-wide" disabled>&#x25B6; Start Server</button>
+      <div id="start-feedback" aria-live="polite"></div>
+
       <!-- Status card -->
       <div class="card" id="srv-status-card">
         <p class="hint">Loading&hellip;</p>
       </div>
 
-      <!-- Standing policy, not a start-now control: deliberately outside
-           #srv-start-section, which goes inert while the server runs. -->
-      <div id="srv-autostart-card" class="card" hidden>
-        <label class="checkbox-label">
-          <input id="srv-autostart" type="checkbox">
-          Start this server when VibePanel starts
-        </label>
-        <p id="srv-autostart-note" class="hint"></p>
-      </div>
-
       <!-- Port (from server.properties), Geyser's Bedrock port if it is installed,
-           and our public IP (looked up at startup) -->
+           and our public IP (looked up at startup). Directly under the status
+           because "is it up" and "where do I connect" are one question. -->
       <div id="srv-port-card" class="card mem-card" hidden>
         <div class="srv-net-row">
           <div id="srv-port-field" class="srv-net-field" hidden>
@@ -138,6 +137,52 @@
             <div id="srv-ip-value" class="mem-input srv-port-value"></div>
           </div>
         </div>
+      </div>
+
+      <!-- Standing policy, not a start-now control: deliberately outside
+           #srv-start-section, which goes inert while the server runs.
+           "Only start automatically if we weren't stopped on purpose" is read
+           off the game's own log at panel start — see _last_run_ending() — so it
+           holds for a stop typed at the pane with nobody watching, not only for
+           the Stop button.
+           Full-width rows in the jar picker's shape: there is no heading because
+           each option is a whole sentence, which leaves nothing for one to say.
+           Only a problem that needs fixing gets a line under them. -->
+      <div id="srv-startpolicy-card" hidden>
+        <div class="policy-list">
+          <label class="policy-item">
+            <input type="radio" name="start-policy" value="never" checked>
+            <span class="policy-text">Never start automatically</span>
+          </label>
+          <label class="policy-item">
+            <input type="radio" name="start-policy" value="always">
+            <span class="policy-text">Always start automatically on boot</span>
+          </label>
+          <label class="policy-item">
+            <input type="radio" name="start-policy" value="unless-stopped">
+            <span class="policy-text">Only start automatically if we weren't stopped on purpose</span>
+          </label>
+        </div>
+        <p id="srv-startpolicy-note" class="hint"></p>
+      </div>
+
+      <!-- Likewise a standing policy: it acts on the stop, whoever caused it,
+           so it is togglable in both states and lives outside the start form.
+           Same full-width row as the choices above — a checkbox rather than a
+           radio, but the same question shape, so it gets the same green.
+           The label says "autosave" because that is the consequence worth
+           knowing: these land in world-saves under the same name a pre-Load
+           autosave uses, so the Worlds page's "Delete all autosaves" sweeps
+           them — which matters when a nightly-restarted server makes one a day.
+           The note below carries live state only, never an explanation. -->
+      <div id="srv-stopbackup-card" hidden>
+        <div class="policy-list">
+          <label class="policy-item">
+            <input id="srv-stopbackup" type="checkbox">
+            <span class="policy-text">Back up the world as an autosave whenever this server stops</span>
+          </label>
+        </div>
+        <p id="srv-stopbackup-note" class="hint"></p>
       </div>
 
       <!-- Start form — shown only when stopped.
@@ -183,8 +228,6 @@
           </div>
         </div>
 
-        <button id="btn-start" class="btn btn-primary btn-wide" disabled>&#x25B6; Start Server</button>
-        <div id="start-feedback" aria-live="polite"></div>
       </div>
 
       <!-- Download Fabric — always visible -->

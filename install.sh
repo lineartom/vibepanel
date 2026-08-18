@@ -63,6 +63,16 @@ Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
 
+# Stop the panel, not the game. A tmux session the panel created itself is a
+# child of this unit and so lands in its cgroup — daemonizing does not escape one
+# — and the default KillMode=control-group would SIGTERM it on every
+# `systemctl restart vibepanel`, taking the running server down with the panel.
+# Worse under the "unless it was stopped on purpose" start policy: the JVM's
+# shutdown hook writes a clean shutdown to the log on the way out, the panel
+# reads that back as a deliberate signal kill, and the server stays down.
+# With KillMode=process, tmux and java survive and the restart is a no-op to them.
+KillMode=process
+
 [Install]
 WantedBy=multi-user.target
 EOF

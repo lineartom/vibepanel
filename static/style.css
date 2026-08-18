@@ -527,7 +527,8 @@ a { text-decoration: none; color: inherit; }
 /* Wider than the memory box it replaces: this one holds a filename. */
 .mem-card .script-input { width: 18rem; max-width: 100%; }
 
-.jar-list {
+.jar-list,
+.policy-list {
   background: var(--bg1);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -585,12 +586,50 @@ a { text-decoration: none; color: inherit; }
   word-break: break-all;
 }
 
-/* Standing policy rather than an action, so it sits quieter than the start
-   form below it: the label carries the meaning, the note carries the effect. */
-#srv-autostart-card { flex-shrink: 0; gap: 0; }
-#srv-autostart-card .checkbox-label { font-size: .95rem; color: var(--text); }
-#srv-autostart-note { padding: .35rem 0 0 1.4rem; font-size: .8rem; }
-#srv-autostart-note:empty { display: none; }
+/* The two standing policies, in the jar picker's shape. Full width because each
+   option is a whole sentence rather than a word — that room is what lets them
+   explain themselves and leaves no heading for a label to carry. The row is the
+   hit target, so the label wraps the input. */
+#srv-startpolicy-card,
+#srv-stopbackup-card {
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+  flex-shrink: 0;
+}
+
+.policy-item {
+  display: flex;
+  align-items: center;
+  gap: .85rem;
+  padding: .75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background .1s;
+  user-select: none;
+}
+.policy-item:last-child { border-bottom: none; }
+.policy-item:hover { background: var(--bg2); }
+/* Green on the whole row, matching .jar-item.selected. Driven by :has() rather
+   than a JS-toggled class so the highlight cannot drift out of step with the
+   control it describes — including the moment before a failed write is undone. */
+.policy-item:has(input:checked) { background: var(--green-bg); }
+.policy-item input {
+  accent-color: var(--green);
+  cursor: pointer;
+  flex-shrink: 0;
+  margin: 0;
+  width: 16px;
+  height: 16px;
+}
+.policy-item input:disabled,
+.policy-item:has(input:disabled) { cursor: default; }
+.policy-text { font-size: .9rem; color: var(--text); }
+
+#srv-startpolicy-note,
+#srv-stopbackup-note { padding: .1rem 0 0; font-size: .8rem; }
+#srv-startpolicy-note:empty,
+#srv-stopbackup-note:empty { display: none; }
 
 .mem-card { flex-shrink: 0; }
 .mem-input {
@@ -606,12 +645,16 @@ a { text-decoration: none; color: inherit; }
 }
 .mem-input:focus { outline: none; border-color: var(--blue); }
 
-.btn-wide { width: 100%; justify-content: center; padding: .7rem; }
+.btn-wide { width: 100%; justify-content: center; padding: .7rem; flex-shrink: 0; }
 
 #start-feedback {
   font-size: .85rem;
   min-height: 1.2em;
 }
+/* It sits between the banner and the status card now, so reserving a line for
+   it leaves a hole on every visit. Same trade the note elements already make:
+   collapse when empty, accept the small shift when something appears. */
+#start-feedback:empty { display: none; }
 
 .dl-card { flex-shrink: 0; }
 .dl-row {

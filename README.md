@@ -10,8 +10,8 @@ A lightweight web frontend for a Minecraft server running in a tmux session. Man
 - **Players** — online players via `/list`, plus the full roster from `whitelist.json` / `ops.json` / `banned-players.json` with names and UUIDs; op/de-op, whitelist, remove, and ban/unban from the UI, with add-suggestions scraped from `logs/latest.log`
 - **Say** — broadcasts a message to the server as `[Server]`
 - **Mods** — toggle Fabric mods on/off (moves files between `mods/` and `mods-saves/`); detects byte-for-byte conflicts
-- **Worlds** — save, load, and delete world backups as `.tgz` archives; autosaves before loading
-- **Server** — start/stop the server (from a jar with a memory setting, or from the game's own start script), download Fabric jars, view MOTD, server icon, port, Geyser's Bedrock port if it's installed, and the host's public IP
+- **Worlds** — save, load, and delete world backups as `.tgz` archives; autosaves before loading, and optionally on every stop
+- **Server** — start/stop the server (from a jar with a memory setting, or from the game's own start script), download Fabric jars, view MOTD, server icon, port, Geyser's Bedrock port if it's installed, and the host's public IP; a per-server policy for starting it when the panel starts (never / always / unless it was stopped on purpose) and a checkbox to back up its world whenever it stops
 
 ## Requirements
 

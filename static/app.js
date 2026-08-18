@@ -155,12 +155,27 @@ function resetSessionUi() {
   $('dl-output').textContent = '';
   $('dl-output-wrap').hidden = true;
 
-  // Not cosmetic: a tick left from the previous server misreports this one's
+  // Not cosmetic: a choice left from the previous server misreports this one's
   // setting, and the next click would POST that intent at the wrong session.
-  $('srv-autostart-card').hidden   = true;
-  $('srv-autostart').checked       = false;
-  $('srv-autostart').disabled      = false;
-  $('srv-autostart-note').textContent = '';
+  // Back to 'never' rather than merely unchecked — a radio group has no blank
+  // state, and 'never' is the one value that cannot start something by mistake.
+  $('srv-startpolicy-card').hidden = true;
+  startPolicy = 'never';
+  setStartPolicyRadios('never');
+  startPolicyRadios().forEach(r => { r.disabled = false; });
+  $('srv-startpolicy-note').textContent = '';
+
+  // The same, and the cached state behind its note as well: a "Backing up the
+  // world now…" left from the server we just left would both misreport this one
+  // and — through stopBackupBusy — hold its Start button for a backup that is
+  // nothing to do with it.
+  $('srv-stopbackup-card').hidden  = true;
+  $('srv-stopbackup').checked      = false;
+  $('srv-stopbackup').disabled     = false;
+  $('srv-stopbackup-note').textContent = '';
+  stopBackupPlan = null;
+  stopBackupLast = null;
+  stopBackupBusy = false;
 
   // Drafts aimed at one particular server. The start form included: a script
   // name is one game's, and left behind it would be typed at another's pane.
@@ -1180,7 +1195,8 @@ function srvStartPolling() {
   loadJars();
   loadServerIdentity();
   loadLatestMinecraft();
-  loadAutostart();
+  loadStartPolicy();
+  loadStopBackup();
   srvPollTimer = setInterval(loadServerStatus, 5000);
 }
 
@@ -1266,6 +1282,13 @@ async function loadServerStatus() {
     card.innerHTML = `<p class="hint">Could not reach server.</p>`;
     return;
   }
+  // Before the branches: the stopped branch re-enables the start form, and
+  // whether Start is actually allowed depends on this.
+  const wasBusy  = stopBackupBusy;
+  stopBackupLast = data.stop_backup || null;
+  stopBackupBusy = stopBackupLast?.state === 'running';
+  renderStopBackupNote();
+
   const startSec = $('srv-start-section');
   if (data.running) {
     // What it is running, read off the process itself: the jar, and the heap it
@@ -1286,20 +1309,34 @@ async function loadServerStatus() {
     // were never typed into this page, and without this the form would sit
     // describing the previous run right up until someone pressed Start.
     if (wasRunning === false) reloadStartForm();
+    // Same edge: under "unless it was stopped on purpose" the note is a reading
+    // of the game's log, which this start has just rewritten.
+    if (wasRunning === false) loadStartPolicy();
     // Keep the start section visible but grayed out and inert.
     startSec.hidden = false;
     startSec.classList.add('srv-start-disabled');
     setStartFormDisabled(true);
     $('btn-stop').addEventListener('click', stopServer);
   } else {
+    // Say when a backup is holding Start, rather than leaving a button that is
+    // grayed out for no visible reason.
     card.innerHTML = `
       <div class="srv-status-row">
         <span class="srv-dot stopped"></span>
         <span class="srv-status-label">Stopped</span>
-      </div>`;
+      </div>
+      ${stopBackupBusy ? `<div class="srv-jar">Backing up the world&hellip;</div>` : ''}`;
     // On running → stopped, re-fetch the jar list so the just-saved
     // last-used jar becomes the preselected default.
     if (wasRunning === true) reloadStartForm();
+    // Same edge, and the edge out of a backup: the note is what reports a stop
+    // the panel handled on its own, and the plan is where its problems appear.
+    if (wasRunning === true || (wasBusy && !stopBackupBusy)) loadStopBackup();
+    // And the start policy's own note, which under "unless it was stopped on
+    // purpose" is a verdict on the stop that just happened. Leaving it would
+    // have the card claiming the last run crashed while someone was watching
+    // the `stop` they typed take effect.
+    if (wasRunning === true) loadStartPolicy();
     startSec.hidden = false;
     startSec.classList.remove('srv-start-disabled');
     setStartFormDisabled(false);
@@ -1437,7 +1474,10 @@ function updateStartEnabled() {
   const ready = startMode === 'script'
     ? $('script-input').value.trim() !== ''
     : !!selectedJar;
-  $('btn-start').disabled = !ready || serverRunning === true;
+  // Held while the world is being tarred after the last stop: starting into it
+  // would corrupt the archive. /api/server/start refuses too — this is so the
+  // button matches, and the status card says why.
+  $('btn-start').disabled = !ready || serverRunning === true || stopBackupBusy;
 }
 
 document.querySelectorAll('input[name="start-mode"]').forEach(radio => {
@@ -1450,56 +1490,161 @@ document.querySelectorAll('input[name="start-mode"]').forEach(radio => {
 
 $('script-input').addEventListener('input', updateStartEnabled);
 
-// ── Autostart ─────────────────────────────────────────────
+// ── Start policy ──────────────────────────────────────────
 //
 // A standing per-server policy, so it stays togglable whether the server is
 // running or stopped — unlike the start form, which goes inert while it runs.
+//
+// The last value the server confirmed, so a failed write has something to go
+// back to. Three radios cannot be restored by flipping a boolean the way the
+// checkbox this replaced could.
+let startPolicy = 'never';
 
-function renderAutostart(d) {
-  $('srv-autostart-card').hidden  = false;
-  $('srv-autostart').checked      = !!d.autostart;
-  $('srv-autostart').disabled     = false;
-
-  // Say what it would actually do. Wrong-game-dir is the failure this panel is
-  // hardest to diagnose, so the directory it believes in is worth the line.
-  const note = $('srv-autostart-note');
-  if (d.problem) {
-    note.textContent = d.autostart ? `Cannot start it yet: ${d.problem}.` : `${d.problem}.`;
-  } else {
-    const what = d.mode === 'script' ? `./${d.script}` : `${d.jar} with ${d.mem}`;
-    note.textContent = `Will run ${what} in ${d.dir}` +
-                       (d.dir_confirmed ? '.' : ' (directory not confirmed yet).');
-  }
+function startPolicyRadios() {
+  return document.querySelectorAll('input[name="start-policy"]');
 }
 
-async function loadAutostart() {
+function setStartPolicyRadios(policy) {
+  startPolicyRadios().forEach(r => { r.checked = r.value === policy; });
+}
+
+function renderStartPolicy(d) {
+  $('srv-startpolicy-card').hidden = false;
+  startPolicy = d.start_policy;
+  setStartPolicyRadios(startPolicy);
+  startPolicyRadios().forEach(r => { r.disabled = false; });
+
+  // Nothing is said about what the policy *would* do: each option is a sentence
+  // that already says it, and `reason` is a diagnostic — the store and the
+  // panel's own boot log are where to go for that. Only a problem earns a line,
+  // because it is the setting quietly not working rather than something to know.
+  $('srv-startpolicy-note').textContent = d.problem
+    ? (d.start_policy === 'never' ? `${d.problem}.` : `Cannot start it: ${d.problem}.`)
+    : '';
+}
+
+async function loadStartPolicy() {
   try {
-    const data = await sessionJson('/api/server/autostart');
+    const data = await sessionJson('/api/server/start-policy');
     if (data === STALE) return;      // reply was for the server we just left
-    if (!data.ok) { $('srv-autostart-card').hidden = true; return; }
-    renderAutostart(data);
+    if (!data.ok) { $('srv-startpolicy-card').hidden = true; return; }
+    renderStartPolicy(data);
   } catch (_) {
-    $('srv-autostart-card').hidden = true;
+    $('srv-startpolicy-card').hidden = true;
   }
 }
 
-$('srv-autostart').addEventListener('change', async () => {
-  const box = $('srv-autostart');
+startPolicyRadios().forEach(radio => {
+  radio.addEventListener('change', async () => {
+    const want = radio.value;
+    const had  = startPolicy;
+    startPolicyRadios().forEach(r => { r.disabled = true; });
+    try {
+      const data = await sessionJson('/api/server/start-policy', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ start_policy: want }),
+      });
+      if (data === STALE) return;    // the write landed; only the redraw is stale
+      if (data.ok) { renderStartPolicy(data); return; }
+      setStartPolicyRadios(had);
+      $('srv-startpolicy-note').textContent = data.error || 'Could not save that.';
+    } catch (err) {
+      setStartPolicyRadios(had);
+      $('srv-startpolicy-note').textContent = err.message;
+    } finally {
+      startPolicyRadios().forEach(r => { r.disabled = false; });
+    }
+  });
+});
+
+// ── Back up the world on stop ─────────────────────────────────
+//
+// The note under the checkbox is written from two sources that arrive
+// separately: the plan, fetched when the page opens and whenever the setting
+// changes, and the live state of the current backup, which rides along on the
+// status poll. Keep the last of each so either can redraw the line alone.
+//
+// It carries *state* only — what a backup is doing or did — never an
+// explanation of what the checkbox means. The label says that, and saying it
+// twice buried the one line that matters: "Backing up the world now…", which is
+// why Start is held.
+
+let stopBackupPlan = null;
+let stopBackupLast = null;
+// Whether a backup is tarring right now, in which case Start is held — see
+// updateStartEnabled(). Separate from stopBackupLast so it survives the plan
+// fetch overwriting the last-result line.
+let stopBackupBusy = false;
+
+function renderStopBackupNote() {
+  const note = $('srv-stopbackup-note');
+  const d    = stopBackupPlan;
+  const bits = [];
+
+  // A problem is not an explanation — it is the setting quietly not working, so
+  // it keeps its line.
+  if (d && d.problem) {
+    bits.push(d.backup_on_stop ? `Cannot back up yet: ${d.problem}.` : `${d.problem}.`);
+  }
+
+  // The last backup this panel ran, from the status poll. Worth its own line:
+  // it is the only place a stop that happened while nobody was looking — a
+  // crash, a `stop` typed at the pane — shows up as having been handled.
+  const last = stopBackupLast;
+  if (last) {
+    if (last.state === 'running') {
+      bits.push('Backing up the world now…');
+    } else if (last.state === 'done') {
+      bits.push(`Last backup ${last.at}: ${last.filename} (${fmtBytes(last.size)}).`);
+    } else if (last.state === 'failed') {
+      bits.push(`Last backup ${last.at} failed: ${last.error}`);
+    } else if (last.state === 'skipped') {
+      bits.push(`Last stop ${last.at} was not backed up: ${last.error}.`);
+    }
+  }
+  note.textContent = bits.join(' ');
+}
+
+function renderStopBackup(d) {
+  $('srv-stopbackup-card').hidden = false;
+  $('srv-stopbackup').checked     = !!d.backup_on_stop;
+  $('srv-stopbackup').disabled    = false;
+  stopBackupPlan = d;
+  // The plan carries the last result too, so a page opened after the fact still
+  // shows it; the poll then keeps it current.
+  if (d.last) stopBackupLast = d.last;
+  renderStopBackupNote();
+}
+
+async function loadStopBackup() {
+  try {
+    const data = await sessionJson('/api/server/backup-on-stop');
+    if (data === STALE) return;      // reply was for the server we just left
+    if (!data.ok) { $('srv-stopbackup-card').hidden = true; return; }
+    renderStopBackup(data);
+  } catch (_) {
+    $('srv-stopbackup-card').hidden = true;
+  }
+}
+
+$('srv-stopbackup').addEventListener('change', async () => {
+  const box  = $('srv-stopbackup');
   const want = box.checked;
   box.disabled = true;
   try {
-    const data = await sessionJson('/api/server/autostart', {
+    const data = await sessionJson('/api/server/backup-on-stop', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ autostart: want }),
+      body:    JSON.stringify({ backup_on_stop: want }),
     });
     if (data === STALE) return;      // the write landed; only the redraw is stale
-    if (data.ok) { renderAutostart(data); return; }
+    if (data.ok) { renderStopBackup(data); return; }
     box.checked = !want;
-    $('srv-autostart-note').textContent = data.error || 'Could not save that.';
+    $('srv-stopbackup-note').textContent = data.error || 'Could not save that.';
   } catch (err) {
     box.checked = !want;
-    $('srv-autostart-note').textContent = err.message;
+    $('srv-stopbackup-note').textContent = err.message;
   } finally {
     box.disabled = false;
   }
@@ -1511,7 +1656,8 @@ $('btn-srv-refresh').addEventListener('click', () => {
   loadJars();
   loadServerIdentity();
   loadLatestMinecraft();
-  loadAutostart();
+  loadStartPolicy();
+  loadStopBackup();
 });
 
 // ── Download Fabric ───────────────────────────────────────
