@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create the release and upload the archive
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check server.py compiles
+        run: python3 -m py_compile server.py
+
+      - name: Build the release archive
+        env:
+          # The tag itself, rather than git describe — nothing is fetched
+          # beyond this commit, and on a tag the two agree anyway.
+          VERSION: ${{ github.ref_name }}
+        run: sh package.sh
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            "vibepanel-$TAG.tar.gz"
