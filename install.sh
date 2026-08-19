@@ -16,6 +16,16 @@ fi
 
 WHERE=$(dirname "$(readlink -f "$0")")
 
+# Get their tailscale IP address
+TAILSCALE_IP=$(tailscale ip -4)
+if [ -z "$TAILSCALE_IP" ]; then
+    echo "Could not determine Tailscale IP address. Please check your Tailscale configuration."
+    echo "We assume you have tailscale because we do no other encryption. Cowardly bailing out."
+    exit 1
+fi
+
+ARGS="--host=${TAILSCALE_IP} --port=8080"
+
 # Ask what user we should run as, default to minecraft
 AS_USER=$(grep "User=" /etc/systemd/system/vibepanel.service | cut -d'=' -f2 || echo "")
 if [ -z "${AS_USER}" ]; then
@@ -52,6 +62,7 @@ sudo -u ${AS_USER} .venv/bin/pip install -q -r requirements.txt
 echo "Creating systemd service file..."
 export INTO
 export AS_USER
+export ARGS
 envsubst < vibepanel.service | sudo tee /etc/systemd/system/vibepanel.service > /dev/null
 systemctl daemon-reload
 systemctl enable vibepanel
@@ -63,12 +74,6 @@ echo "To uninstall, run 'systemctl disable --now vibepanel' and remove the servi
 echo "Remember this service does NOT use SSL. You should NOT open a port for it. Access it through tailscale."
 echo
 echo
-# Get their tailscale IP address
-TAILSCALE_IP=$(tailscale ip -4)
-if [ -n "$TAILSCALE_IP" ]; then
-    echo "You can access the panel at http://${TAILSCALE_IP}:8080"
-else
-    echo "Could not determine Tailscale IP address. Please check your Tailscale configuration"
-fi
+echo "You can access the panel at http://${TAILSCALE_IP}:8080"
 echo
 echo "Have fun!"

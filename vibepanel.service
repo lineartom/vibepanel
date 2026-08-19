@@ -20,7 +20,7 @@ After=network.target
 Type=simple
 User=${AS_USER}
 WorkingDirectory=${INTO}
-ExecStart=${INTO}/.venv/bin/python server.py --port 8080
+ExecStart=${INTO}/.venv/bin/python server.py ${ARGS}
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
