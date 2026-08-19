@@ -18,9 +18,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=YOUR_USER
-WorkingDirectory=/path/to/vibepanel
-ExecStart=/path/to/vibepanel/.venv/bin/python server.py --session minecraft --port 8080
+User=${AS_USER}
+WorkingDirectory=${INTO}
+ExecStart=${INTO}/.venv/bin/python server.py --port 8080
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

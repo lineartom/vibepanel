@@ -14,13 +14,20 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Ask what user we should run as, default to minecraft
-read -p "Run as user (leave blank for minecraft): " AS_USER
-AS_USER=${AS_USER:-minecraft}
 WHERE=$(dirname "$(readlink -f "$0")")
 
-read -p "Install into (leave blank for /home/${AS_USER}/vibepanel): " INTO
-INTO=${INTO:-/home/${AS_USER}/vibepanel}
+# Ask what user we should run as, default to minecraft
+AS_USER=$(grep "User=" /etc/systemd/system/vibepanel.service | cut -d'=' -f2 || echo "")
+if [ -z "${AS_USER}" ]; then
+    read -p "Run as user (leave blank for minecraft): " AS_USER
+    AS_USER=${AS_USER:-minecraft}
+fi
+
+INTO=$(grep "WorkingDirectory=" /etc/systemd/system/vibepanel.service | cut -d'=' -f2 || echo "")
+if [ -z "${INTO}" ]; then
+    read -p "Install into (leave blank for /home/${AS_USER}/vibepanel): " INTO
+    INTO=${INTO:-/home/${AS_USER}/vibepanel}
+fi
 
 # If target already exists, ask if we should overwrite (upgrade) it
 if [ -d "${INTO}" ]; then
@@ -43,42 +50,12 @@ sudo -u ${AS_USER} python3 -m venv .venv --upgrade-deps
 sudo -u ${AS_USER} .venv/bin/pip install -q -r requirements.txt
 
 echo "Creating systemd service file..."
-cat <<EOF > /etc/systemd/system/vibepanel.service
-# Drop this in /etc/systemd/system/ and run:
-#   systemctl daemon-reload
-#   systemctl enable --now vibepanel
-#
-# Adjust User, WorkingDirectory, and --session as needed.
-
-[Unit]
-Description=VibePanel — Minecraft web frontend
-After=network.target
-
-[Service]
-Type=simple
-User=${AS_USER}
-WorkingDirectory=${INTO}
-ExecStart=${INTO}/.venv/bin/python server.py --session minecraft --port 8080
-Restart=on-failure
-RestartSec=5
-Environment=PYTHONUNBUFFERED=1
-
-# Stop the panel, not the game. A tmux session the panel created itself is a
-# child of this unit and so lands in its cgroup — daemonizing does not escape one
-# — and the default KillMode=control-group would SIGTERM it on every
-# `systemctl restart vibepanel`, taking the running server down with the panel.
-# Worse under the "unless it was stopped on purpose" start policy: the JVM's
-# shutdown hook writes a clean shutdown to the log on the way out, the panel
-# reads that back as a deliberate signal kill, and the server stays down.
-# With KillMode=process, tmux and java survive and the restart is a no-op to them.
-KillMode=process
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+export INTO
+export AS_USER
+envsubst < vibepanel.service | sudo tee /etc/systemd/system/vibepanel.service > /dev/null
 systemctl daemon-reload
-systemctl enable --now vibepanel
+systemctl enable vibepanel
+systemctl restart vibepanel
 
 echo "Installation complete. You can check the status with 'systemctl status vibepanel' and view logs with 'journalctl -u vibepanel -f'."
 echo "If you need to change the user, port, or session name, edit the service file at /etc/systemd/system/vibepanel.service and run 'systemctl daemon-reload' again."
