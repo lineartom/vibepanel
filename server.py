@@ -2,6 +2,7 @@
 import os
 import re
 import glob
+import gzip
 import time
 import json
 import argparse
@@ -12,7 +13,7 @@ import struct
 import subprocess
 import threading
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file, abort
 
 app = Flask(__name__)
@@ -1207,9 +1208,12 @@ LATEST_LOG     = "latest.log"
 GEYSER_CONFIG = os.path.join("config", "Geyser-Fabric", "config.yml")
 _YAML_KEY_RE  = re.compile(r'^(\s*)([A-Za-z0-9_.-]+):\s*(.*?)\s*$')
 
-# Only the tail of logs/latest.log is ever read. Rotated .gz archives are slow to
-# unpack, and stitching together the tails of several files would mean searching a
-# history with holes in it — "seen in the recent log" stays one contiguous window.
+# The suggestion and last-run readers below read only the tail of
+# logs/latest.log: stitching together the tails of several files would mean
+# searching a history with holes in it — "seen in the recent log" stays one
+# contiguous window. The Activity section is the one reader of the rotated .gz
+# archives, and it reads each of them whole, once, under its own horizon and
+# cache — see "# ── Play activity ──".
 LOG_SCAN_MAX_BYTES = 512 * 1024
 
 _MC_NAME_RE   = re.compile(r'^[A-Za-z0-9_]{1,16}$')
@@ -2535,6 +2539,392 @@ def api_server_stop():
         return jsonify({"ok": True})
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": str(e)}), 503
+
+
+# ── Play activity ────────────────────────────────────────────────────────────
+#
+# "Who was playing, when, and for how long" — parsed from the game's own logs,
+# the same witness _last_run_ending() reads. Joins and leaves live in
+# logs/latest.log and the rotated logs/YYYY-MM-DD-N.log.gz beside it; this is
+# the one feature that opens the rotated archives (the tail-only rule above
+# LOG_SCAN_MAX_BYTES is scoped to the suggestion and last-run readers).
+#
+# A .gz is immutable once log4j has written it, so each is parsed once per
+# panel run and memoized against (size, mtime) — the panel's first
+# mtime-keyed cache. Only latest.log is ever re-read, and only when its own
+# (size, mtime) has moved. The caches are memory-only for the _STOP_BACKUPS
+# reason: a cold re-parse costs well under a second, so persisting it would
+# buy nothing and add a file that can go stale. No lock, following
+# HEAP_PEAKS: every write is one dict assignment of an immutable value, and
+# the worst race is a duplicate parse.
+#
+# Three transforms keep the summary readable, each with its constant below:
+# STITCH merges a player's reconnects into one stint, CLUSTER groups
+# overlapping stints into one play-session, and DEMOTE turns players who only
+# popped in for a moment into a footnote instead of a timeline lane.
+
+ACTIVITY_DAYS             = 14        # horizon: rotated logs older than this are never opened
+ACTIVITY_MAX_GZ_FILES     = 64        # sanity cap; a nightly-restarted server makes ~2 a day
+ACTIVITY_STITCH_SECS      = 10 * 60   # a rejoin within this gap continues the same stint
+ACTIVITY_BRIEF_SECS       = 5 * 60    # stints all shorter than this demote to a footnote
+ACTIVITY_CLUSTER_GAP_SECS = 15 * 60   # bridged when clustering, so a mid-evening server
+                                      # restart doesn't split one evening into two sessions
+
+# latest.log gets its own window, not _read_log_tail's 512 KB — a busy day
+# exceeds that, and a join scrolled out of the window silently loses the whole
+# stint. The .gz cap bounds a decompression bomb, not a tune.
+ACTIVITY_LATEST_MAX_BYTES = 8 * 1024 * 1024
+ACTIVITY_GZ_MAX_BYTES     = 16 * 1024 * 1024
+
+_GZ_LOG_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})-(\d+)\.log\.gz$')
+
+# Matched with fullmatch against the message *body* after the "]: " split, the
+# _last_run_ending() rule: chat always arrives prefixed ("<Bob> …", "[Server]
+# …"), so an anchored body match cannot be forged by a player typing "Alice
+# joined the game". "lost connection" is deliberately not matched: every
+# fully-joined player gets "left the game" on every disconnect path (kick,
+# timeout, quit), and "lost connection" without it only happens for a player
+# who never finished joining — who never opened an interval. Crashes log
+# neither line and are handled by the force-close at the next start marker.
+_JOINED_RE = re.compile(r'^([A-Za-z0-9_]{1,16}) joined the game$')
+_LEFT_RE   = re.compile(r'^([A-Za-z0-9_]{1,16}) left the game$')
+
+# gdir -> {filename: ((size, mtime), (events, last_epoch))} for the rotated
+# logs, and gdir -> ((size, mtime), (events, last_epoch)) for latest.log.
+_ACTIVITY_GZ_CACHE: dict = {}
+_ACTIVITY_LATEST_CACHE: dict = {}
+
+
+def _parse_activity_log(blob: str) -> tuple[list, tuple | None]:
+    """Raw activity events from one log file's text, in file-relative time.
+
+    Returns (events, last) where events are (day, "HH:MM:SS", kind, payload):
+
+        ("join",  name)   ("leave", name)
+        ("stop",  None)   "Stopping server" — everyone is offline after it
+        ("start", prev)   "Starting minecraft server version…" — a crash or
+                          kill left no leave lines, so whatever is still open
+                          must be closed at `prev`, the (day, stamp) of the
+                          last timestamped line before it; None when the
+                          marker opens the window, which the caller resolves
+                          to the previous file's last line
+
+    and `last` is the (day, stamp) of the file's final timestamped line. Day
+    is an offset from the start of the text, counting each backwards clock
+    jump as a midnight (the _scan_latest_log idiom — lines carry only
+    [HH:MM:SS]); the caller anchors day 0 to a real date. Events are only
+    taken from timestamped lines, so a stack-trace continuation can never
+    contribute one.
+    """
+    events, day, stamp, prev = [], 0, None, None
+    for line in blob.splitlines():
+        t = _LOG_LINE_TIME_RE.match(line)
+        if t:
+            if stamp and t.group(1) < stamp:
+                day += 1
+            stamp = t.group(1)
+            msg = line.partition("]: ")[2]
+            if msg:
+                hit = _JOINED_RE.fullmatch(msg) or _LEFT_RE.fullmatch(msg)
+                if hit:
+                    kind = "join" if msg.endswith("joined the game") else "leave"
+                    events.append((day, stamp, kind, hit.group(1)))
+                elif msg == _STOP_ORDERLY:
+                    events.append((day, stamp, "stop", None))
+                elif msg.startswith(_RUN_STARTED):
+                    events.append((day, stamp, "start", prev))
+            prev = (day, stamp)
+    return events, prev
+
+
+def _activity_dated(parsed: tuple, day0: date) -> tuple[list, float | None]:
+    """Anchor a file's parsed events to real time: (epoch, kind, payload).
+
+    day0 is the date of the file's first timestamped line; every event dates
+    forward from it. A "start" event's prev collapses to an epoch here too.
+    Returns (events, last_epoch), last_epoch being the file's final line.
+    """
+    def ep(day, stamp):
+        clock = datetime.strptime(stamp, "%H:%M:%S").time()
+        return datetime.combine(day0 + timedelta(days=day), clock).timestamp()
+
+    events, last = parsed
+    out = []
+    for day, stamp, kind, payload in events:
+        if kind == "start":
+            payload = ep(*payload) if payload else None
+        out.append((ep(day, stamp), kind, payload))
+    return out, (ep(*last) if last else None)
+
+
+def _activity_log_files(gdir: str) -> list[tuple[str, date]]:
+    """Rotated logs worth reading: (filename, filename date), ascending by
+    (date, sequence), filename-dated within ACTIVITY_DAYS, newest
+    ACTIVITY_MAX_GZ_FILES kept. A filename that doesn't parse is skipped, not
+    an error — admins drop all sorts of things into logs/."""
+    try:
+        names = os.listdir(os.path.join(gdir, LOGS_DIR))
+    except OSError:
+        return []
+    cutoff, found = date.today() - timedelta(days=ACTIVITY_DAYS), []
+    for name in names:
+        m = _GZ_LOG_RE.match(name)
+        if not m:
+            continue
+        try:
+            d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            continue
+        if d >= cutoff:
+            found.append((d, int(m.group(4)), name))
+    found.sort()
+    return [(name, d) for d, _n, name in found[-ACTIVITY_MAX_GZ_FILES:]]
+
+
+def _activity_events_gz(gdir: str, filename: str, base_date: date) -> tuple[tuple, bool]:
+    """One rotated log's dated events, parsed at most once per panel run.
+
+    Dates count *forward* from the filename's date — never from mtime, which
+    for a .gz is the rotation time: OnStartupTriggeringPolicy fires at the
+    next server start, so a file can be gzipped days after its last line was
+    written. Returns ((events, last_epoch), parsed_now).
+    """
+    path = os.path.join(gdir, LOGS_DIR, filename)
+    st = os.stat(path)
+    sig = (st.st_size, st.st_mtime)
+    cache = _ACTIVITY_GZ_CACHE.setdefault(gdir, {})
+    hit = cache.get(filename)
+    if hit and hit[0] == sig:
+        return hit[1], False
+    with gzip.open(path, "rb") as fh:
+        blob = fh.read(ACTIVITY_GZ_MAX_BYTES).decode("utf-8", "replace")
+    result = _activity_dated(_parse_activity_log(blob), base_date)
+    cache[filename] = (sig, result)
+    return result, True
+
+
+def _activity_events_latest(gdir: str) -> tuple[list, float | None]:
+    """latest.log's dated events, re-parsed only when (size, mtime) moved.
+
+    Back-dating from mtime is valid here and only here: the file's mtime *is*
+    the time of its last line, which anchors the rollover-counted day offsets
+    (the _scan_latest_log formula). Raises OSError like _read_log_tail, so
+    the caller can tell "no log" from "could not read it".
+    """
+    path = os.path.join(gdir, LOGS_DIR, LATEST_LOG)
+    st = os.stat(path)
+    sig = (st.st_size, st.st_mtime)
+    hit = _ACTIVITY_LATEST_CACHE.get(gdir)
+    if hit and hit[0] == sig:
+        return hit[1]
+    with open(path, "rb") as fh:
+        if st.st_size > ACTIVITY_LATEST_MAX_BYTES:
+            fh.seek(st.st_size - ACTIVITY_LATEST_MAX_BYTES)
+            blob = fh.read().decode("utf-8", "replace").partition("\n")[2]
+        else:
+            blob = fh.read().decode("utf-8", "replace")
+    parsed = _parse_activity_log(blob)
+    last_day = parsed[1][0] if parsed[1] else 0
+    day0 = date.fromtimestamp(st.st_mtime) - timedelta(days=last_day)
+    result = _activity_dated(parsed, day0)
+    _ACTIVITY_LATEST_CACHE[gdir] = (sig, result)
+    return result
+
+
+def _activity_intervals(events: list, running: bool, now: float,
+                        last_epoch: float | None) -> list:
+    """Merged, epoch-sorted events -> per-player raw intervals
+    (name, start, end, ongoing).
+
+    A join over an already-open name means the leave was lost (window
+    truncation): the old interval closes at the new join. A leave with no
+    open join is dropped — its start fell outside the window, and half an
+    interval dates a session wrongly. A stop closes everyone at its own
+    time; a start marker closes everyone at the last line seen *before* it,
+    because a crash logs no leaves. What is still open at the end of the
+    stream is ongoing if the server is running, else it ended when the log
+    did — the best witness a dead server leaves.
+    """
+    open_, out = {}, []
+
+    def close(name, start, end, ongoing=False):
+        if end > start:
+            out.append((name, start, end, ongoing))
+
+    for epoch, kind, payload in events:
+        if kind == "join":
+            if payload in open_:
+                close(payload, open_[payload], epoch)
+            open_[payload] = epoch
+        elif kind == "leave":
+            start = open_.pop(payload, None)
+            if start is not None:
+                close(payload, start, epoch)
+        else:  # "stop" or "start"
+            at = payload if kind == "start" else epoch
+            if at is not None:
+                for name, start in open_.items():
+                    close(name, start, at)
+            open_.clear()
+
+    for name, start in open_.items():
+        if running:
+            close(name, start, now, ongoing=True)
+        elif last_epoch is not None:
+            close(name, start, last_epoch)
+    return out
+
+
+def _activity_stitch(intervals: list) -> list:
+    """Per player, merge intervals separated by less than ACTIVITY_STITCH_SECS
+    into one stint — a dropped connection and a rejoin is one visit, not two.
+    The merge count rides along as `reconnects`."""
+    stints = {}
+    for name, start, end, ongoing in sorted(intervals, key=lambda iv: (iv[0], iv[1])):
+        run = stints.setdefault(name, [])
+        if run and start - run[-1]["end"] < ACTIVITY_STITCH_SECS:
+            run[-1]["end"] = max(run[-1]["end"], end)
+            run[-1]["ongoing"] = run[-1]["ongoing"] or ongoing
+            run[-1]["reconnects"] += 1
+        else:
+            run.append({"name": name, "start": start, "end": end,
+                        "ongoing": ongoing, "reconnects": 0})
+    return [st for run in stints.values() for st in run]
+
+
+def _activity_cluster(stints: list) -> list:
+    """Group stints into play-sessions: a single sweep over start-sorted
+    stints, which on a 1-D timeline is connected components. The bridging gap
+    keeps one evening whole across a short server restart that disconnected
+    everyone at once."""
+    clusters, reach = [], 0.0
+    for st in sorted(stints, key=lambda st: st["start"]):
+        if clusters and st["start"] <= reach + ACTIVITY_CLUSTER_GAP_SECS:
+            clusters[-1].append(st)
+            reach = max(reach, st["end"])
+        else:
+            clusters.append([st])
+            reach = st["end"]
+    return clusters
+
+
+def _activity_summary(clusters: list) -> list:
+    """Clusters -> the payload's play-session dicts, newest first.
+
+    DEMOTE resolves here, per cluster: a player whose stints in the cluster
+    are all shorter than ACTIVITY_BRIEF_SECS — and none ongoing, someone who
+    just arrived is not a blip — goes to the `brief` footnote instead of
+    minting a timeline lane. A player who earned a lane keeps *all* their
+    stints on it, brief ones included: the lane is already paid for. A
+    cluster whose players are all brief is kept, flagged `all_brief`, so a
+    lone two-minute hop still shows as a compact line rather than vanishing.
+    """
+    out = []
+    for stints in clusters:
+        by = {}
+        for st in sorted(stints, key=lambda st: st["start"]):
+            by.setdefault(st["name"], []).append(st)
+        players, brief = [], []
+        for name, run in by.items():
+            if any(st["ongoing"] or st["end"] - st["start"] >= ACTIVITY_BRIEF_SECS
+                   for st in run):
+                players.append({
+                    "name": name,
+                    "total_secs": int(sum(st["end"] - st["start"] for st in run)),
+                    "stints": [{"start": int(st["start"]), "end": int(st["end"]),
+                                "ongoing": st["ongoing"],
+                                "reconnects": st["reconnects"]} for st in run],
+                })
+            else:
+                brief.append({"name": name, "start": int(run[0]["start"]),
+                              "secs": int(sum(st["end"] - st["start"] for st in run))})
+        start = min(st["start"] for st in stints)
+        end   = max(st["end"] for st in stints)
+        out.append({"start": int(start), "end": int(end),
+                    "duration_secs": int(end - start),
+                    "ongoing": any(st["ongoing"] for st in stints),
+                    "all_brief": not players,
+                    "players": players, "brief": brief})
+    out.sort(key=lambda c: c["start"], reverse=True)
+    return out
+
+
+def _activity_report(gdir: str, running: bool, now: float) -> dict:
+    """The whole pipeline: discover files, parse-or-reuse, merge, transform.
+
+    Events are merged across file boundaries before interval-building — one
+    evening's joins can sit in a .gz with its leaves in latest.log, since the
+    stock log4j config rotates at midnight mid-run. Files feed in ascending
+    order carrying each file's last-line epoch forward, which is what a
+    window-opening start marker resolves against; the final stable sort by
+    epoch guards against filename-date skew between files.
+    """
+    files = _activity_log_files(gdir)
+    cache = _ACTIVITY_GZ_CACHE.get(gdir)
+    if cache is not None:
+        # Prune to exactly the files just listed, so entries age out of memory
+        # as their files age past the horizon.
+        for stale in set(cache) - {name for name, _d in files}:
+            del cache[stale]
+
+    events, carry, parsed_now = [], None, 0
+
+    def take(file_events, last):
+        nonlocal carry
+        for epoch, kind, payload in file_events:
+            if kind == "start" and payload is None:
+                payload = carry
+            events.append((epoch, kind, payload))
+        if last is not None:
+            carry = last
+
+    for name, base in files:
+        try:
+            (evs, last), fresh = _activity_events_gz(gdir, name, base)
+        except OSError:
+            continue
+        parsed_now += fresh
+        take(evs, last)
+
+    latest_found = True
+    try:
+        evs, last = _activity_events_latest(gdir)
+        take(evs, last)
+    except FileNotFoundError:
+        latest_found = False
+    except OSError:
+        pass
+
+    events.sort(key=lambda ev: ev[0])
+    intervals = _activity_intervals(events, running, now, carry)
+    return {
+        "activity": _activity_summary(_activity_cluster(_activity_stitch(intervals))),
+        "now": int(now), "running": running,
+        # Diagnostics, the roster endpoint's rationale: an empty history is
+        # far more often a wrong game dir than a genuinely idle server, and
+        # the empty state must say where it looked.
+        "game_dir": gdir, "horizon_days": ACTIVITY_DAYS,
+        "gz_found": len(files), "gz_parsed_now": parsed_now,
+        "latest_log": latest_found,
+    }
+
+
+@app.route("/api/activity")
+def api_activity():
+    """Recent play sessions parsed from the game's own logs.
+
+    Epochs, not formatted strings, deliberately: the client draws a timeline,
+    and a Gantt needs numbers — the one sanctioned exception to formatting on
+    the server. `now` is the panel's clock so ongoing bars and day grouping
+    never depend on the browser's clock agreeing with ours.
+    """
+    target = _session_target()
+    try:
+        gdir = tmux_pane_path(target)
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
+    return jsonify({"ok": True,
+                    **_activity_report(gdir, _is_running(target), time.time())})
 
 
 @app.route("/api/server/download-fabric", methods=["POST"])

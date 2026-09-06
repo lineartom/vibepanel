@@ -692,9 +692,11 @@ command; ban reasons go through `pane_text()` — see the section below.
 ### Log scraping for add-suggestions
 
 `_scan_latest_log()` pulls `UUID of player <name> is <uuid>` lines out of the last
-512 KB of **`logs/latest.log` only**. Rotated logs are ignored, `.gz` and plain alike:
-stitching the tails of several files together would mean searching a history with holes
-in it, which is both slower and confusing to reason about.
+512 KB of **`logs/latest.log` only**. Rotated logs are ignored *here*, `.gz` and plain
+alike: stitching the tails of several files together would mean searching a history
+with holes in it, which is both slower and confusing to reason about. The Activity
+page is the one feature that does read the rotated archives — whole, not tails, so
+no holes — see its section below.
 
 The read itself is `_read_log_tail()`, shared with `_last_run_ending()` — the two
 readers of this file want the same window and the same seek. It **raises** rather
@@ -710,6 +712,102 @@ midnight" — is wrong in a way that happens not to matter: stock `log4j2.xml` c
 pattern, so the file also rotates at midnight mid-run and there is usually no
 rollover left to count. A config without the time-based trigger still produces one,
 which is why the counting stays.
+
+## The Activity page
+
+`/api/activity` answers "who was playing, when, and for how long" from the game's
+own logs — `logs/latest.log` plus the rotated `logs/YYYY-MM-DD-N.log.gz` beside it,
+which makes it the **one** reader of the rotated archives (the tail-only rule above
+`LOG_SCAN_MAX_BYTES` is scoped to the suggestion and last-run readers). The page is
+called **Activity**, never "Sessions": that word is taken — see the vocabulary note
+at the top of this file — and a "play session" in the code is always a *cluster*.
+
+### What is parsed, and what deliberately is not
+
+`_parse_activity_log()` matches `<name> joined the game` / `<name> left the game`
+with `fullmatch` against the message body after the `"]: "` split — the same
+anti-spoofing rule as `_last_run_ending()`, and for the same reason: `latest.log`
+carries chat, chat always arrives prefixed, and an unanchored test would let any
+player fabricate history by typing "Alice joined the game". Events are only taken
+from timestamped lines, so a stack-trace continuation cannot contribute one.
+
+`lost connection` is deliberately unmatched: every fully-joined player gets
+`left the game` on every disconnect path (kick, timeout, quit), and `lost
+connection` without it only happens for a player who never finished joining — who
+never opened an interval. Crashes log neither line; they are handled by the two
+lifecycle markers this parser shares with `_last_run_ending()`: `Stopping server`
+closes every open interval at its own time, and `Starting minecraft server version`
+closes them at the last timestamped line seen *before* it — the best witness to
+when a crashed run actually died. A start marker that opens its file resolves
+against the previous file's last line, which is why files feed in ascending order
+carrying that epoch forward.
+
+### Dating, and why gz files trust their filename
+
+Lines carry only `[HH:MM:SS]`. `latest.log` back-dates from its mtime — the mtime
+*is* the time of its last line — exactly as `_scan_latest_log()` does. A rotated
+`.gz` must **never** do that: its mtime is the *rotation* time, and
+`OnStartupTriggeringPolicy` fires at the next server start, so a file can be
+gzipped days after its last line was written. It dates forward from the date in
+its filename instead. The residual: a server idle since day D but restarted on D+3
+may gzip day-D lines into a file named D+3, and nothing in the content can correct
+that — worst case a session groups under the rotation date, never with wrong times
+or durations.
+
+Events from all files are merged and epoch-sorted **before** interval-building,
+because the stock config rotates at midnight mid-run: one evening's joins sit in a
+`.gz` with their leaves in `latest.log`.
+
+### The cache: parse each gz exactly once
+
+A `.gz` is immutable once log4j has written it, so `_ACTIVITY_GZ_CACHE` memoizes
+each parse against `(size, mtime)` — the panel's first mtime-keyed cache — and
+`latest.log` is re-parsed only when its own `(size, mtime)` moves. Both caches are
+memory-only, the `_STOP_BACKUPS` rule: a cold re-parse costs well under a second,
+so persisting it would buy nothing and add a file that can go stale. No lock,
+following `HEAP_PEAKS`: every write is one dict assignment of an immutable value,
+and the worst race is a duplicate parse. The horizon is `ACTIVITY_DAYS` (14) by
+filename date, capped at `ACTIVITY_MAX_GZ_FILES`, and each request prunes the cache
+to the files it just listed so entries age out of memory with their files.
+
+`latest.log` gets its own window (`ACTIVITY_LATEST_MAX_BYTES`, 8 MB), not
+`_read_log_tail()`'s 512 KB — a busy day exceeds that, and a join scrolled out of
+the window silently loses the whole stint. The one interval-builder consequence: a
+leave whose join fell outside the window (or horizon) is dropped, half an interval
+being worse than none.
+
+### Three transforms keep the summary readable
+
+This is the answer to "overlapping groups and one-minute drop-ins must not make
+the view a mess", and each has a constant:
+
+| | what | why |
+|---|---|---|
+| STITCH (`ACTIVITY_STITCH_SECS`, 10 min) | a player's intervals separated by less than the gap merge into one **stint**, counting `reconnects` | a dropped connection and a rejoin is one visit, not two |
+| CLUSTER (`ACTIVITY_CLUSTER_GAP_SECS`, 15 min) | start-sorted stints sweep into **play-sessions**; a stint starting within the gap of the cluster's reach joins it | on a 1-D timeline the sweep *is* connected components; the bridge keeps one evening whole across a short mid-evening server restart |
+| DEMOTE (`ACTIVITY_BRIEF_SECS`, 5 min) | a player whose stints in a cluster are *all* shorter (and none ongoing — someone who just arrived is not a blip) becomes a footnote, not a timeline lane | blips must not mint lanes; a player who earned a lane keeps all their stints on it, brief ones included, because the lane is already paid for |
+
+DEMOTE resolves **after** CLUSTER, per cluster: the footnote is per-session wording
+anyway, and a demoted visit must still stretch the session it visited. A cluster
+whose players are all brief is kept, flagged `all_brief`, rendered as a compact
+line — a lone two-minute hop still shows rather than vanishing.
+
+### The payload carries epochs
+
+The client draws a Gantt — one lane per player, bars positioned by percent inside a
+relative track, the heap-bar idiom — and a Gantt needs numbers, so `/api/activity`
+returns epochs. This is the one sanctioned exception to "format on the server",
+paid for with the client's first time formatters (`fmtDuration`, `fmtClock`); the
+payload's `now` is the panel's clock, so ongoing bars and day grouping never depend
+on the browser's clock agreeing with ours. Diagnostics ride along (`game_dir`,
+`gz_found`, `gz_parsed_now`, `latest_log`) for the roster endpoint's reason: an
+empty history is far more often a wrong game dir than an idle server, and the
+empty state renders where it looked.
+
+No polling: page-enter load plus a manual Refresh, the Worlds idiom — re-fetching
+per entry is what the server-side cache makes cheap, and having no guard flag and
+no module-level cache shrinks the `resetSessionUi()` obligation to one container
+clear.
 
 ## Geyser's Bedrock port
 
@@ -857,7 +955,8 @@ peaks are re-seeded from the next sample, so the button just calls `loadOverview
   mods/                # active Fabric mods                   (MODS_DIR)
   mods-saves/          # inactive/stashed mods                (MODS_SAVES_DIR)
   world-saves/         # .tgz world backups                   (WORLDS_DIR)
-  logs/latest.log      # name→UUID suggestions, and how the last run ended (read-only)
+  logs/latest.log      # name→UUID suggestions, how the last run ended, play activity (read-only)
+  logs/YYYY-MM-DD-N.log.gz   # older play activity for the Activity page (read-only)
   config/Geyser-Fabric/config.yml   # bedrock.port, if Geyser is installed (read-only)
   whitelist.json       # read + written by the Players page
   ops.json             #   "

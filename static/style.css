@@ -825,6 +825,64 @@ a { text-decoration: none; color: inherit; }
 }
 .world-item-actions { display: flex; gap: .4rem; }
 
+/* ── Activity page ──────────────────────────────────────── */
+#activity-body { display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
+#activity-list { display: flex; flex-direction: column; gap: .75rem; }
+#activity-list .section-title { margin-top: .5rem; }
+
+.activity-head {
+  display: flex;
+  align-items: baseline;
+  gap: .75rem;
+  min-width: 0;
+}
+.activity-span     { font-size: .9rem; font-weight: 500; white-space: nowrap; }
+.activity-duration { font-size: .82rem; color: var(--text2); white-space: nowrap; }
+.activity-names {
+  font-size: .8rem;
+  color: var(--text3);
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-gantt { display: flex; flex-direction: column; gap: .35rem; }
+.activity-lane  { display: flex; align-items: center; gap: .75rem; }
+.activity-lane-name {
+  flex: 0 0 7.5rem;
+  font-size: .8rem;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The heap-bar recipe: a relative track, children positioned by percent. */
+.activity-track {
+  position: relative;
+  flex: 1;
+  height: 14px;
+  background: var(--bg3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.activity-bar {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  background: var(--blue);
+  border-radius: 3px;
+  min-width: 3px;   /* a one-minute blip on a long evening stays visible */
+}
+.activity-bar.ongoing { background: var(--green); }
+
+.activity-brief { font-size: .78rem; }
+
+@media (max-width: 700px) {
+  .activity-lane-name { flex-basis: 5rem; }
+  .activity-names { display: none; }  /* the lanes name everyone anyway */
+}
+
 /* ── Buttons ────────────────────────────────────────────── */
 .btn {
   display: inline-flex; align-items: center; gap: .4rem;

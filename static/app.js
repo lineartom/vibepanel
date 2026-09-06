@@ -26,6 +26,22 @@ function parseWorldSave(filename) {
   return { dateStr: dt.toLocaleString(), label: m[7] || null, isAutosave: m[7] === 'autosave' };
 }
 
+// The Activity payload carries epochs rather than server-formatted strings —
+// a timeline needs numbers — so these two are the client-side formatting that
+// deviation pays for. Nothing else should grow to depend on them lightly:
+// "format on the server" is still the house rule.
+function fmtDuration(secs) {
+  if (secs < 60) return 'under a minute';
+  const m = Math.round(secs / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h} h ${m % 60} min` : `${h} h`;
+}
+
+function fmtClock(epoch) {
+  return new Date(epoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
 // ── Sessions ─────────────────────────────────────────────
 
 let sessions       = [];
@@ -204,6 +220,10 @@ function resetSessionUi() {
   $('players-online').innerHTML     = loading;
   $('roster-list').innerHTML        = loading;
   $('suggest-list').innerHTML       = loading;
+  // Activity keeps no guard flag and no module-level cache (the Worlds idiom:
+  // it re-fetches on every page entry), so this clear is its whole obligation
+  // here — the per-session tooltips it renders live inside this container.
+  $('activity-list').innerHTML      = loading;
   ['mods-active-count', 'mods-inactive-count',
    'roster-count', 'suggest-count'].forEach(id => { $(id).textContent = ''; });
   $('mods-disk-info').hidden   = true;
@@ -260,6 +280,7 @@ function runPageEnterHooks(page) {
   if (page === 'console' && consoleStick) consoleScrollToBottom();
   if (page === 'overview') overviewStartPolling();
   if (page === 'players')  fetchServerRunning().then(() => loadPlayers());
+  if (page === 'activity') loadActivity();
   if (page === 'say')      fetchServerRunning();
   if (page === 'server')   srvStartPolling();
   if (page === 'mods')     { fetchServerRunning(); loadMods(); loadSystemStats().then(() => renderDiskInfo('mods-disk-info')); }
@@ -2101,6 +2122,106 @@ async function deleteAutosaves() {
 
 $('btn-worlds-refresh').addEventListener('click', loadWorlds);
 $('btn-world-save').addEventListener('click', saveWorld);
+
+// ── Activity ─────────────────────────────────────────────
+//
+// Recent play sessions, drawn as one card per session with a lane per player.
+// The server does all the clustering; this side only positions bars — the
+// heap-bar idiom, a relative track with left/width-percent children.
+
+async function loadActivity() {
+  const wrap = $('activity-list');
+  wrap.innerHTML = '<p class="hint">Loading&hellip;</p>';
+  try {
+    const data = await sessionJson('/api/activity');
+    if (data === STALE) return;
+    renderActivity(data);
+  } catch (err) {
+    wrap.innerHTML = `<p class="hint">Error: ${esc(err.message)}</p>`;
+  }
+}
+
+function renderActivity(data) {
+  const wrap = $('activity-list');
+
+  if (!data.ok) {
+    wrap.innerHTML = `<p class="hint">Error: ${esc(data.error)}</p>`;
+    return;
+  }
+  if (data.activity.length === 0) {
+    // An empty history is far more often a wrong game dir than an idle
+    // server, so say where we looked — the roster's empty-state rationale.
+    wrap.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">&#x1F4C8;</div>
+        <p>No play sessions in the last ${data.horizon_days} days.</p>
+        <p class="empty-detail">Looked in ${esc(data.game_dir)}/logs &mdash;
+          ${data.gz_found} rotated log${data.gz_found !== 1 ? 's' : ''},
+          latest.log ${data.latest_log ? 'present' : 'missing'}.</p>
+      </div>`;
+    return;
+  }
+
+  let html = '';
+  let lastDay = '';
+  data.activity.forEach(c => {
+    const day = new Date(c.start * 1000);
+    if (day.toDateString() !== lastDay) {
+      lastDay = day.toDateString();
+      const label = day.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' });
+      html += `<h2 class="section-title">${esc(label)}</h2>`;
+    }
+    html += activityCard(c, data.now);
+  });
+  wrap.innerHTML = html;
+}
+
+function activityCard(c, now) {
+  const end   = c.ongoing ? now : c.end;
+  const names = (c.players.length ? c.players : c.brief).map(p => esc(p.name)).join(', ');
+  const head  = `
+    <div class="activity-head">
+      <span class="activity-span">${fmtClock(c.start)} &ndash; ${c.ongoing ? 'now' : fmtClock(c.end)}</span>
+      <span class="activity-duration">${fmtDuration(end - c.start)}</span>
+      ${c.ongoing ? '<span class="badge badge-online">Live</span>' : ''}
+      <span class="activity-names">${names}</span>
+    </div>`;
+
+  let gantt = '';
+  if (!c.all_brief) {
+    const span  = Math.max(end - c.start, 1);
+    const lanes = c.players.map(p => {
+      const bars = p.stints.map(s => {
+        const sEnd  = s.ongoing ? now : s.end;
+        const left  = ((s.start - c.start) / span * 100).toFixed(1);
+        const width = ((sEnd - s.start) / span * 100).toFixed(1);
+        const recon = s.reconnects ? `, ${s.reconnects} reconnect${s.reconnects !== 1 ? 's' : ''}` : '';
+        const title = s.ongoing
+          ? `since ${fmtClock(s.start)} (${fmtDuration(sEnd - s.start)}${recon})`
+          : `${fmtClock(s.start)} – ${fmtClock(s.end)} (${fmtDuration(s.end - s.start)}${recon})`;
+        return `<div class="activity-bar${s.ongoing ? ' ongoing' : ''}"
+                     style="left:${left}%;width:${width}%" title="${esc(title)}"></div>`;
+      }).join('');
+      return `
+        <div class="activity-lane">
+          <span class="activity-lane-name" title="total ${esc(fmtDuration(p.total_secs))}">${esc(p.name)}</span>
+          <div class="activity-track">${bars}</div>
+        </div>`;
+    }).join('');
+    gantt = `<div class="activity-gantt">${lanes}</div>`;
+  }
+
+  // Blip visits are a footnote, not lanes — that is the whole point.
+  let brief = '';
+  if (c.brief.length) {
+    const items = c.brief.map(b => `${esc(b.name)} (${fmtDuration(b.secs)})`).join(', ');
+    brief = `<p class="activity-brief hint">${c.players.length ? 'Also stopped by' : 'Stopped by'}: ${items}</p>`;
+  }
+
+  return `<div class="card activity-card">${head}${gantt}${brief}</div>`;
+}
+
+$('btn-activity-refresh').addEventListener('click', loadActivity);
 
 // ── Boot ─────────────────────────────────────────────────
 
