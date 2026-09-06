@@ -42,6 +42,20 @@ function fmtClock(epoch) {
   return new Date(epoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+// fmtClock renders in whatever timezone the *browser* sits in — not the
+// panel's, and not necessarily the game server's — so the Activity page
+// names it explicitly rather than leaving times that look precise but are
+// silently relative to whoever's screen is showing them.
+function browserTz() {
+  const tz     = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const offMin = -new Date().getTimezoneOffset();
+  const sign   = offMin < 0 ? '-' : '+';
+  const abs    = Math.abs(offMin);
+  const h      = Math.floor(abs / 60);
+  const m      = abs % 60;
+  return `${tz} (UTC${sign}${h}${m ? ':' + String(m).padStart(2, '0') : ''})`;
+}
+
 // ── Sessions ─────────────────────────────────────────────
 
 let sessions       = [];
@@ -2132,6 +2146,7 @@ $('btn-world-save').addEventListener('click', saveWorld);
 async function loadActivity() {
   const wrap = $('activity-list');
   wrap.innerHTML = '<p class="hint">Loading&hellip;</p>';
+  $('activity-tz').textContent = `Times shown in ${browserTz()}`;
   try {
     const data = await sessionJson('/api/activity');
     if (data === STALE) return;
