@@ -2210,6 +2210,36 @@ _STOP_ASKED_RE = re.compile(r'^(?:\[[^\[\]]{1,64}: )?Stopping the server\.{0,3}\
 _STOP_ORDERLY  = "Stopping server"
 _RUN_STARTED   = "Starting minecraft server version"
 
+# Since 26.3 the game labels every *broadcast* system message in the log with a
+# "System chat: " prefix — join/leave, advancements, the `list` answer, and the
+# feedback an op's command broadcasts to other ops. 26.2 and earlier logged the
+# bare message. Both formats are in service, often in adjacent files of the same
+# logs dir (a 26.2 run rotates out, the 26.3 run that replaced it rotates in),
+# so every reader of those lines strips the label before matching rather than
+# choosing a format.
+#
+# Stripping it does not weaken the anti-spoofing rule, because the rule is the
+# *anchor*, not the absence of a prefix: what is matched after the label is
+# still a fullmatch (or an anchored regex), so chat ("<Bob> …"), /say ("[Bob]
+# …") and command feedback ("[Bob: …]") cannot forge a line in either format —
+# their own prefix is inside the label and survives the strip. Only an op with
+# /tellraw can emit a system chat whose entire body is a forged line, which was
+# equally true of the unlabelled format.
+#
+# Not applied to _STOP_ORDERLY, _RUN_STARTED or _CRASH_MARKERS: those are the
+# server's own logger output, never broadcast to players, and never labelled.
+_SYSTEM_CHAT_LABEL = "System chat: "
+
+
+def _log_broadcast(msg: str) -> str:
+    """A log line's message body with the version's system-chat label removed.
+
+    The label is stripped once and only as a literal prefix, so a message whose
+    own text happens to contain it cannot shed a second one.
+    """
+    return msg[len(_SYSTEM_CHAT_LABEL):] if msg.startswith(_SYSTEM_CHAT_LABEL) else msg
+
+
 # A crash is *also* an orderly shutdown, which is the trap here: runServer()
 # catches Throwable, writes the crash report, and then its `finally` calls
 # stopServer() — which logs "Stopping server" unconditionally. So a heap OOM at
@@ -2297,7 +2327,7 @@ def _last_run_ending(gdir: str) -> tuple:
         msg = line.partition("]: ")[2]
         if msg.startswith(_RUN_STARTED):
             asked = orderly = crashed = False
-        elif _STOP_ASKED_RE.match(msg):
+        elif _STOP_ASKED_RE.match(_log_broadcast(msg)):
             asked = True
         elif msg == _STOP_ORDERLY:
             orderly = True
@@ -2578,7 +2608,8 @@ ACTIVITY_GZ_MAX_BYTES     = 16 * 1024 * 1024
 
 _GZ_LOG_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})-(\d+)\.log\.gz$')
 
-# Matched with fullmatch against the message *body* after the "]: " split, the
+# Matched with fullmatch against the message *body* after the "]: " split and
+# after _log_broadcast() strips the version's "System chat: " label, the
 # _last_run_ending() rule: chat always arrives prefixed ("<Bob> …", "[Server]
 # …"), so an anchored body match cannot be forged by a player typing "Alice
 # joined the game". "lost connection" is deliberately not matched: every
@@ -2625,9 +2656,10 @@ def _parse_activity_log(blob: str) -> tuple[list, tuple | None]:
             stamp = t.group(1)
             msg = line.partition("]: ")[2]
             if msg:
-                hit = _JOINED_RE.fullmatch(msg) or _LEFT_RE.fullmatch(msg)
+                body = _log_broadcast(msg)
+                hit = _JOINED_RE.fullmatch(body) or _LEFT_RE.fullmatch(body)
                 if hit:
-                    kind = "join" if msg.endswith("joined the game") else "leave"
+                    kind = "join" if body.endswith("joined the game") else "leave"
                     events.append((day, stamp, kind, hit.group(1)))
                 elif msg == _STOP_ORDERLY:
                     events.append((day, stamp, "stop", None))

@@ -411,6 +411,9 @@ Three traps in the scan, all of them load-bearing:
   produces, `[Rcon: Stopping the server]` and `[Notch: Stopping the server]`. The
   crash markers are safe under `startswith` for the same reason — chat always arrives
   prefixed, as `<Bob> …` or `/say`'s `[Server] …`.
+- **The body may carry a `System chat: ` label, which `_log_broadcast()` strips
+  first.** See the section below — it applies to the strong line (a player op's
+  `/stop` broadcasts its feedback) but never to the other three markers.
 - **`All dimensions are saved` is not a marker.** `/save-all flush` takes the same
   branch and backup plugins run it on a timer, so a crash after one would read as a
   deliberate stop.
@@ -418,6 +421,52 @@ Three traps in the scan, all of them load-bearing:
   `Starting minecraft server version`. `latest.log` normally rotates away at the next
   server start, but that is a log4j config an admin can change, and a stale marker
   from the previous run would otherwise report this run's crash as deliberate.
+
+### The `System chat: ` label, and which lines wear it
+
+As of **26.3** the game logs every message it *broadcasts to players* behind a
+`System chat: ` label; 26.2 and earlier logged the bare text. So the same line has
+two shapes depending on the version that wrote it:
+
+```
+[19:24:21] [Server thread/INFO]: msternow left the game                  ← 26.2
+[19:24:21] [Server thread/INFO]: System chat: msternow left the game      ← 26.3
+```
+
+Both shapes are permanently in service and they turn up **in adjacent files of one
+`logs/` dir** — a 26.2 run rotates out, the 26.3 run that replaced it rotates in —
+so the readers strip the label with `_log_broadcast()` rather than picking a format.
+Detecting the version per file would be worse: a rotated `.gz` need not contain the
+`Starting minecraft server version` line at all.
+
+Which lines wear it is exactly "is this broadcast to players":
+
+| wears the label | does not |
+|---|---|
+| `joined the game` / `left the game` | `Stopping server` (`stopServer()`'s own log) |
+| advancements and goals | `Starting minecraft server version` |
+| the `list` answer | the crash markers |
+| an op's command feedback, `[Bob: Teleported …]` | `UUID of player X is …` |
+| `Stopping the server` **when a player op typed `/stop`** | …and it from the console |
+
+The right-hand column is the server's own logger output, which never passes through
+chat, so stripping is scoped to the readers of the left — notably *not* to
+`_STOP_ORDERLY`, `_RUN_STARTED` or `_CRASH_MARKERS`.
+
+**Stripping does not weaken the anti-spoofing rule, because the rule is the anchor
+rather than the absence of a prefix.** What is matched after the label is still a
+`fullmatch` (or an anchored regex), and a forgery's own prefix sits *inside* the
+label and survives the strip: `System chat: <Bob> Alice joined the game` fails on
+`<Bob> `, `/say` fails on `[Bob] `, command feedback on `[Bob: `. The residual is
+unchanged too — an op with `/tellraw` can emit a system chat whose entire body is a
+forged line, which was equally true of the unlabelled format.
+
+This was found by the Activity page reporting a three-player, two-hour evening as a
+single 5-second session: the only run in the sample logs old enough to be 26.2 was a
+5-second visit, and the 26.3 run that held the actual evening parsed to nothing. Note
+how quiet the failure was — a labelled log is not malformed, it simply contains no
+events, which is indistinguishable from an idle server. `/api/players` happened to
+survive it only because it reads the `list` answer with `re.search`.
 
 What it gets wrong, and these are worth knowing rather than hiding:
 
@@ -725,11 +774,15 @@ at the top of this file — and a "play session" in the code is always a *cluste
 ### What is parsed, and what deliberately is not
 
 `_parse_activity_log()` matches `<name> joined the game` / `<name> left the game`
-with `fullmatch` against the message body after the `"]: "` split — the same
-anti-spoofing rule as `_last_run_ending()`, and for the same reason: `latest.log`
-carries chat, chat always arrives prefixed, and an unanchored test would let any
-player fabricate history by typing "Alice joined the game". Events are only taken
-from timestamped lines, so a stack-trace continuation cannot contribute one.
+with `fullmatch` against the message body after the `"]: "` split and after
+`_log_broadcast()` strips a `System chat: ` label — both are broadcast lines, so
+26.3 labels them and 26.2 does not; see the label section above, and note that
+getting this wrong is what made the page report a two-hour evening as five seconds.
+The `fullmatch` is the same anti-spoofing rule as `_last_run_ending()`, and for the
+same reason: `latest.log` carries chat, chat always arrives prefixed, and an
+unanchored test would let any player fabricate history by typing "Alice joined the
+game". Events are only taken from timestamped lines, so a stack-trace continuation
+cannot contribute one.
 
 `lost connection` is deliberately unmatched: every fully-joined player gets
 `left the game` on every disconnect path (kick, timeout, quit), and `lost
