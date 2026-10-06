@@ -1148,7 +1148,8 @@ def _do_mod_move(src_dir: str, dst_dir: str, filename: str):
 
 @app.route("/")
 def index():
-    return render_template("index.html", tmux_target=TMUX_TARGET, version=VERSION)
+    return render_template("index.html", tmux_target=TMUX_TARGET, version=VERSION,
+                           activity_days=ACTIVITY_DAYS)
 
 
 @app.route("/api/sessions")

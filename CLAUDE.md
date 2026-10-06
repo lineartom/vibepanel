@@ -862,6 +862,26 @@ per entry is what the server-side cache makes cheap, and having no guard flag an
 no module-level cache shrinks the `resetSessionUi()` obligation to one container
 clear.
 
+### The Overview's activity strip
+
+The Overview carries a fixed-size summary of every server's Activity: one row per
+server across `ACTIVITY_DAYS` day-aligned columns (browser-local, like the Activity
+page's day headings — the last column is today, and each is labelled with its
+weekday over its day of the month), each play-session highlighted and
+nothing else. A row is a link to that server's Activity page
+(`clickSessionTab(s, 'activity')`), which is what lets the rows stay this plain.
+**The size never changes**: a server with no history, one still loading and one whose
+fetch failed all get the same empty row, the reason in its tooltip. The day count
+reaches the client as `data-days` on `#overview-activity`, rendered from
+`ACTIVITY_DAYS`, so it has one source.
+
+It reuses `/api/activity` per session rather than a new endpoint, and is fetched by
+`loadOverview()` only — page entry, Refresh, Reset Peaks — **never by the status
+timer**: a running server's `latest.log` moves constantly, so every timed fetch would
+miss the cache and re-parse it, the same reason the Activity page doesn't poll. It
+renders into its own container, not `#overview-grid`, so the 15 s card redraws leave
+it alone.
+
 ## Geyser's Bedrock port
 
 `/api/server/identity` reports `bedrock_port` from `config/Geyser-Fabric/config.yml`

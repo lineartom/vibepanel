@@ -121,7 +121,9 @@ function renderSessionTabs() {
   });
 }
 
-function clickSessionTab(tab) {
+// `page` overrides where we land — the Overview's activity strip links straight
+// to a server's Activity page rather than its Server page.
+function clickSessionTab(tab, page) {
   if (tab === 'overview') {
     activeTab = 'overview';
     renderSessionTabs();
@@ -131,7 +133,7 @@ function clickSessionTab(tab) {
 
   // Switching sessions keeps the current control page; coming from
   // Overview lands on the Server page.
-  const targetPage   = activePage === 'overview' ? 'server' : activePage;
+  const targetPage   = page || (activePage === 'overview' ? 'server' : activePage);
   const switching    = tab !== currentSession;
   const wasOnTarget  = activePage === targetPage;
   activeTab = tab;
@@ -1002,6 +1004,7 @@ function overviewStopPolling() {
 
 async function loadOverview() {
   renderOverviewCards();
+  loadOverviewActivity();
 
   // System stats (host-level) — fire alongside session status fetches.
   loadSystemStats().then(s => renderSystemStats(s));
@@ -1160,6 +1163,120 @@ function heapBlock(d) {
 
 function goToSession(session) {
   clickSessionTab(session);
+}
+
+// ── Overview: activity strip ──
+//
+// One fixed-height row per server across the last ACTIVITY_DAYS days, the
+// play-sessions of each highlighted and nothing else — every detail is one
+// click away on that server's Activity page, which is what lets these rows
+// stay this plain. The size never changes: every server gets a row whether
+// its history is empty, still loading, or failed to load.
+//
+// Loaded by loadOverview() only — page entry, Refresh, Reset Peaks — never by
+// the status timer. On a running server latest.log moves constantly, so a
+// timed fetch would re-parse it every tick; the Activity page doesn't poll
+// for the same reason.
+
+// session -> /api/activity payload, or { ok: false, error } on failure
+const overviewActivity = {};
+
+async function loadOverviewActivity() {
+  renderOverviewActivity();
+  const targets = sessions.length ? sessions : [currentSession];
+  await Promise.all(targets.map(async s => {
+    try {
+      const res = await fetch(`/api/activity?s=${encodeURIComponent(s)}`);
+      overviewActivity[s] = await res.json();
+    } catch (err) {
+      overviewActivity[s] = { ok: false, error: err.message };
+    }
+  }));
+  renderOverviewActivity();
+}
+
+// Day-aligned in the browser's timezone, matching the Activity page's day
+// headings: the last column is today, its future simply empty.
+function activityWindow() {
+  const days  = parseInt($('overview-activity').dataset.days, 10) || 14;
+  const first = new Date();
+  first.setHours(0, 0, 0, 0);
+  first.setDate(first.getDate() - (days - 1));
+  const ticks = [];
+  for (let i = 0; i <= days; i++) {
+    const d = new Date(first);
+    d.setDate(first.getDate() + i);       // setDate, not +86400: DST days aren't 24 h
+    ticks.push(d.getTime() / 1000);
+  }
+  return { days, ticks, start: ticks[0], end: ticks[days] };
+}
+
+function renderOverviewActivity() {
+  const wrap    = $('overview-activity');
+  const targets = sessions.length ? sessions : [currentSession];
+  if (!targets[0]) { wrap.innerHTML = ''; return; }
+
+  const win  = activityWindow();
+  const span = win.end - win.start;
+  const pct  = t => ((Math.max(win.start, Math.min(win.end, t)) - win.start) / span * 100).toFixed(2);
+
+  const dividers = win.ticks.slice(1, -1)
+    .map(t => `<div class="ov-act-day" style="left:${pct(t)}%"></div>`).join('');
+
+  const rows = targets.map(s => {
+    const d = overviewActivity[s];
+    let segs = '', note = '';
+    if (!d) {
+      note = 'loading…';
+    } else if (!d.ok) {
+      note = `activity unavailable: ${d.error || 'unknown error'}`;
+    } else {
+      segs = d.activity.filter(c => (c.ongoing ? d.now : c.end) > win.start).map(c => {
+        const end   = c.ongoing ? d.now : c.end;
+        const names = (c.players.length ? c.players : c.brief).map(p => p.name).join(', ');
+        const day   = new Date(c.start * 1000).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+        const title = `${day}, ${fmtClock(c.start)} – ${c.ongoing ? 'now' : fmtClock(c.end)}: ${names}`;
+        const left  = pct(c.start);
+        const cls   = c.ongoing ? ' ongoing' : c.all_brief ? ' brief' : '';
+        return `<div class="ov-act-seg${cls}" style="left:${left}%;width:${(pct(end) - left).toFixed(2)}%"
+                     title="${esc(title)}"></div>`;
+      }).join('');
+      if (!d.activity.length) note = `no play sessions in the last ${d.horizon_days} days`;
+    }
+    return `
+      <a class="ov-act-row" href="#" data-session="${esc(s)}" title="${esc(`${s}: ${note || 'open Activity'}`)}">
+        <span class="ov-act-name">${esc(s)}</span>
+        <span class="ov-act-track">${dividers}${segs}</span>
+      </a>`;
+  }).join('');
+
+  // Weekday over day-of-month under each column; today is the last one. Both
+  // weekday forms are rendered and CSS picks one — "Tue" doesn't fit a
+  // phone-width column, "T" does.
+  const axis = win.ticks.slice(0, -1).map((t, i) => {
+    const d  = new Date(t * 1000);
+    const wd = form => esc(d.toLocaleDateString([], { weekday: form }));
+    return `<span class="ov-act-tick${i === win.days - 1 ? ' today' : ''}"
+                  title="${esc(d.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' }))}">
+              <span class="ov-act-wd ov-act-wd--short">${wd('short')}</span><span class="ov-act-wd ov-act-wd--narrow">${wd('narrow')}</span>
+              <span>${d.getDate()}</span>
+            </span>`;
+  }).join('');
+
+  wrap.innerHTML = `
+    <div class="ov-act-head">
+      <span class="ov-act-title">Activity</span>
+      <span class="hint">last ${win.days} days &middot; ${esc(browserTz())}</span>
+    </div>
+    ${rows}
+    <div class="ov-act-row ov-act-axis"><span class="ov-act-name"></span><span class="ov-act-ticks">${axis}</span></div>`;
+
+  wrap.querySelectorAll('a.ov-act-row').forEach(a => {
+    a.addEventListener('click', e => {
+      e.preventDefault();
+      clickSessionTab(a.dataset.session, 'activity');
+    });
+  });
 }
 
 $('btn-overview-refresh').addEventListener('click', loadOverview);
