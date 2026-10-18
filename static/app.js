@@ -2103,6 +2103,8 @@ function renderWorldsList(data) {
           <div class="world-item-actions">
             <button class="btn btn-ghost btn-sm btn-world-load"
                     data-filename="${esc(save.name)}"${running ? ' disabled' : ''}>Load</button>
+            <a class="btn btn-ghost btn-sm" download
+               href="${esc(api('/api/worlds/download?filename=' + encodeURIComponent(save.name)))}">Download</a>
             <button class="btn btn-danger btn-sm btn-world-delete"
                     data-filename="${esc(save.name)}">Delete</button>
           </div>

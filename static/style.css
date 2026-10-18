@@ -892,6 +892,7 @@ a { text-decoration: none; color: inherit; }
   cursor: pointer; transition: background .12s, opacity .12s;
 }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
+a.btn { text-decoration: none; }
 
 .btn-primary { background: var(--green); color: #000; }
 .btn-primary:hover:not(:disabled) { background: #3aab48; }

@@ -3253,6 +3253,32 @@ def api_worlds_delete():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/worlds/download")
+def api_worlds_download():
+    """Send a single world save archive to the browser as a download."""
+    target   = _session_target()
+    filename = request.args.get("filename", "").strip()
+
+    # Same gate as Load/Delete: the name must be one of ours, so a request
+    # can only pick an archive in WORLDS_DIR and never contributes a path.
+    if not _WORLD_SAVE_RE.match(filename):
+        return jsonify({"ok": False, "error": "Invalid filename"}), 400
+
+    try:
+        gdir = tmux_pane_path(target)
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
+
+    # Only finished archives carry this name — _archive_world() writes to a
+    # hidden .tmp and links it into place — so nothing here can be half-written.
+    file_path = os.path.join(gdir, WORLDS_DIR, filename)
+    if not os.path.isfile(file_path):
+        return jsonify({"ok": False, "error": "File not found"}), 404
+
+    return send_file(file_path, mimetype="application/gzip",
+                     as_attachment=True, download_name=filename)
+
+
 @app.route("/api/worlds/delete-autosaves", methods=["POST"])
 def api_worlds_delete_autosaves():
     """Delete all autosave archives from WORLDS_DIR."""
