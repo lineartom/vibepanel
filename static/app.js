@@ -2345,7 +2345,12 @@ async function loadWorld(filename) {
 
     if (data.ok) {
       const note = data.autosaved ? ` (autosaved as ${data.autosaved})` : '';
-      opFb.textContent = `✓ World loaded${note}.`;
+      // The world was a symlink and is now an ordinary directory. Worth saying:
+      // whoever made that link will otherwise go looking for it.
+      const link = data.unlinked
+        ? ` The world was a symlink to ${data.unlinked}; it is now a real directory here, and ${data.unlinked} was left untouched.`
+        : '';
+      opFb.textContent = `✓ World loaded${note}.${link}`;
       opFb.className   = 'fb-ok';
     } else {
       opFb.textContent = `Error: ${data.error}`;

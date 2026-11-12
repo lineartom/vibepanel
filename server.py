@@ -1013,6 +1013,24 @@ _STOP_BACKUPS     = {}
 _STOP_BACKUP_LOCK = threading.Lock()
 
 
+def _world_member(world_path: str) -> str:
+    """What to hand tar so that it archives the world, not a pointer to it.
+
+    A world kept on another disk is a symlink in the game dir, and tar given a
+    symlink archives the symlink: 248 bytes, exit status 0, and a "backup" that
+    restores nothing. `world/.` makes tar walk *through* the link — the path
+    resolves to the directory — while every link *inside* the world is still
+    stored as a link, which `-h` would not do: it follows them all, including
+    any that lead out of the world or round in a circle. (A trailing slash
+    alone is not enough; GNU tar strips it and archives the link.)
+
+    The members come out as `world/./…`, which unpacks to `world/` like any
+    other archive. An ordinary directory keeps the plain spelling, so nothing
+    changes for the usual case.
+    """
+    return "world/." if os.path.islink(world_path) else "world"
+
+
 def _archive_world(gdir: str, suffix: str = None) -> tuple:
     """Tar <gdir>/world into WORLDS_DIR as world-<ts>[-<suffix>].tgz.
 
@@ -1057,7 +1075,7 @@ def _archive_world(gdir: str, suffix: str = None) -> tuple:
         saves_path, f".world-{os.getpid()}-{threading.get_ident()}.tgz.tmp")
     try:
         subprocess.run(
-            ["tar", "-czf", tmp_path, "-C", gdir, "world"],
+            ["tar", "-czf", tmp_path, "-C", gdir, _world_member(world_path)],
             check=True, capture_output=True, text=True,
         )
         for _ in range(60):
@@ -3693,6 +3711,7 @@ def api_worlds_load():
 
     world_path = os.path.join(gdir, "world")
     autosaved  = None
+    unlinked   = None
 
     if os.path.isdir(world_path):
         try:
@@ -3701,25 +3720,43 @@ def api_worlds_load():
             return jsonify({"ok": False, "error": f"Autosave failed: {e.stderr or str(e)}"}), 500
         except Exception as e:
             return jsonify({"ok": False, "error": f"Autosave failed: {e}"}), 500
-        try:
+
+    # Make way for the archive. A world that is a symlink — one kept on another
+    # disk — is *unlinked*, not emptied: tar will not unpack through a symlink
+    # (and should not), rmtree refuses one, and what the link points at is not
+    # ours to delete. So the link goes, the directory it led to stays exactly
+    # as it was, and the restored world is an ordinary directory in the game
+    # dir. The response says so, because the admin who made that link will want
+    # to know it is gone. islink first: it is also true of a dangling link,
+    # which isdir() is not.
+    try:
+        if os.path.islink(world_path):
+            unlinked = os.path.realpath(world_path)
+            os.unlink(world_path)
+            print(f"[{target}] world was a symlink to {unlinked}; unlinked it to "
+                  f"load {filename}, and left {unlinked} as it was")
+        elif os.path.isdir(world_path):
             shutil.rmtree(world_path)
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"Failed to remove current world: {e}"}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Failed to remove current world: {e}",
+                        "autosaved": autosaved}), 500
 
     try:
         subprocess.run(
             ["tar", "-xzf", archive_path, "-C", gdir],
             check=True, capture_output=True, text=True,
         )
-        return jsonify({"ok": True, "autosaved": autosaved})
+        return jsonify({"ok": True, "autosaved": autosaved, "unlinked": unlinked})
     except subprocess.CalledProcessError as e:
         return jsonify({
             "ok":        False,
             "error":     f"Extract failed: {e.stderr or str(e)}",
             "autosaved": autosaved,
+            "unlinked":  unlinked,
         }), 500
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "autosaved": autosaved}), 500
+        return jsonify({"ok": False, "error": str(e), "autosaved": autosaved,
+                        "unlinked": unlinked}), 500
 
 
 @app.route("/api/worlds/delete", methods=["POST"])

@@ -638,6 +638,23 @@ The one place a world archive is written: the Worlds page's Save, the autosave
 before a Load, and the on-stop backup all come through it, so all three produce
 the same shape of file in the same place.
 
+**A symlinked world is followed, one level.** A world kept on another disk is a
+symlink in the game dir, and tar handed a symlink archives the symlink — 248 bytes,
+exit status 0, and a "backup" that restores nothing, which Save, the pre-Load
+autosave and the on-stop backup all did. `_world_member()` hands tar `world/.`
+instead when `world` is a link: the path resolves through it, while links *inside*
+the world are still stored as links. Not `-h`, which follows every link there is,
+including ones that lead out of the world or in a circle; and not a trailing slash,
+which GNU tar strips before looking. Members are then named `world/./…` and unpack
+to `world/` like any other archive. An ordinary directory keeps the plain `world`.
+
+**Load unlinks a symlinked world rather than emptying it.** tar refuses to unpack
+through a symlink, `rmtree` refuses to remove one, and what the link points at is
+not the panel's to delete. So Load removes the *link*, leaves its target exactly as
+it was, and the restored world is an ordinary directory in the game dir — the
+response carries `unlinked` and the page says so. An admin who wants the world back
+on the other disk moves it and re-links it; the panel will not guess at that.
+
 Tar writes to a hidden `.tmp` first. A tar that dies half way — the panel killed
 mid-backup, a full disk — must not leave a truncated archive in the list looking
 loadable, because Load deletes the current world *before* extracting.
