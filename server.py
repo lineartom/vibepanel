@@ -4033,7 +4033,9 @@ def api_mods_list():
             "active":   _scan(os.path.join(gdir, MODS_DIR)),
             "inactive": _scan(os.path.join(gdir, MODS_SAVES_DIR)),
             # Prefill for the update check's version field; no network involved.
-            "game_version": _guess_game_version(gdir, target),
+            # Keyed by session, like everything else in .vibepanel.json — not
+            # by target, which may carry a :window.pane suffix.
+            "game_version": _guess_game_version(gdir, target.split(":")[0]),
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
