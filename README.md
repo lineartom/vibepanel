@@ -28,10 +28,31 @@ git clone <this-repo> vibepanel
 cd vibepanel
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python server.py --session minecraft --port 8080
+python server.py --session minecraft
 ```
 
-Open `http://<host>:8080` in a browser. The `--session` value should match the name of your tmux session (`tmux ls` to check). If you only have one tmux session, the name doesn't matter — VibePanel will find it automatically.
+Open `http://localhost:8080` in a browser on the same machine. The `--session` value should match the name of your tmux session (`tmux ls` to check). If you only have one tmux session, the name doesn't matter — VibePanel will find it automatically.
+
+### Reaching it from your phone: use Tailscale
+
+**VibePanel has no login and no encryption, on purpose.** Anyone who can reach its
+port can stop your server, op themselves and delete your worlds. It leaves the
+question of who that is to the network — so by default it listens on `localhost`
+only, and nothing outside the machine can reach it at all.
+
+To use it from another device, put the host and that device on the same
+[Tailscale](https://tailscale.com) network and tell VibePanel to listen on the
+host's Tailscale address:
+
+```bash
+python server.py --session minecraft --host "$(tailscale ip -4)"
+```
+
+Then open `http://<that-address>:8080` from anything on your tailnet. Tailscale
+supplies what VibePanel leaves out: only your own devices can connect, and the
+traffic is encrypted. `install.sh` sets this up for you.
+
+Please don't use `--host 0.0.0.0`, and don't forward the port on your router.
 
 ### VibePanel remembers your servers
 
@@ -93,6 +114,7 @@ Most people need none of these — session names and game directories are rememb
 | Flag | Env var | Default | Purpose |
 |---|---|---|---|
 | `--session` | `TMUX_TARGET` | `minecraft` | tmux target; repeat for several servers. Declares the set and is remembered |
+| `--host` | — | `127.0.0.1` | address to listen on; see "Reaching it from your phone" above |
 | `--port` | — | `8080` | HTTP port |
 | `--allowed-host` | `ALLOWED_HOSTS` | *(none)* | a DNS name you reach the panel by, if it isn't the machine's own hostname (see below); repeat for several |
 | `--state-file` | `STATE_FILE` | `./vibepanel-state.json` | where VibePanel keeps what it remembers |

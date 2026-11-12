@@ -3,7 +3,7 @@
 ## Running the dev server
 
 ```bash
-python server.py                                        # defaults: 0.0.0.0:8080, tmux session "minecraft"
+python server.py                                        # defaults: 127.0.0.1:8080, tmux session "minecraft"
 python server.py --port 5000 --session mc               # custom port and session name
 python server.py --session survival --session creative  # multiple servers; shows tab switcher
 python server.py                                        # ...and after that, just this
@@ -35,7 +35,7 @@ later can move the store.
 | `--worlds-dir` | `WORLDS_DIR` | `world-saves` | dir for world .tgz backups |
 | `--mods-dir` | `MODS_DIR` | `mods` | active mods directory |
 | `--mods-saves-dir` | `MODS_SAVES_DIR` | `mods-saves` | inactive (stashed) mods directory |
-| `--host` | — | `0.0.0.0` | bind address |
+| `--host` | — | `127.0.0.1` | bind address. Loopback by default: there is no login and no TLS, so being reachable from anywhere else has to be something the admin asked for — `install.sh` passes the host's Tailscale address |
 | `--port` | — | `8080` | bind port |
 | `--allowed-host` | `ALLOWED_HOSTS` (comma-separated) | *(none)* | a DNS name the panel is reached by, when that is not this machine's own hostname; **repeat** for several. See "Who may talk to the panel" |
 
@@ -1266,7 +1266,9 @@ above for the full list.
 ## Who may talk to the panel
 
 The panel has no login: whoever can reach the port is the admin. "Who can reach
-it" is therefore the whole of its access control, and a browser is a way of
+it" is therefore the whole of its access control — which is why `--host` defaults to
+loopback and the supported way to reach it from elsewhere is a Tailscale address,
+never `0.0.0.0` — and a browser is a way of
 reaching it that the network cannot see — any page open in a browser that can
 reach the panel can ask that browser to send it requests. Binding to a Tailscale
 address does nothing about that, because the request comes from the admin's own

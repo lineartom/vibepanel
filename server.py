@@ -4132,7 +4132,14 @@ def _refuse_root() -> None:
 if __name__ == "__main__":
     _refuse_root()
     parser = argparse.ArgumentParser(description="VibePanel — Minecraft web frontend")
-    parser.add_argument("--host", default="0.0.0.0")
+    # Loopback unless told otherwise. The panel has no login and no TLS — it
+    # relies on the network it is put on, and that has to be a choice somebody
+    # made (a Tailscale address, as install.sh picks), not what happens when
+    # nobody chose.
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="address to listen on (default: 127.0.0.1, this machine "
+                             "only). There is no login: bind only to a network you "
+                             "trust, e.g. --host \"$(tailscale ip -4)\"")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--allowed-host", action="append", dest="allowed_hosts",
                         default=None, metavar="NAME",
