@@ -249,6 +249,19 @@ The running edge fires on `wasRunning === false`, a real transition, not on the
 `null` of a first load: `srvStartPolling()` already calls `loadJars()` there, and
 the startup observation has already put the values in the store by then.
 
+**The edges are measured against `srvLastRunning`, the Server page's own record of
+what it last drew — not the shared `serverRunning`.** Whether the server is up needs
+no edge at all; every poll redraws that from the answer in hand. The edges exist
+only as the cue to re-fetch three things that are loaded once rather than per poll:
+the start form and the two policy notes. `serverRunning` cannot be that yardstick
+because every caller of `fetchServerRunning()` writes it, including the 15 s poller
+that keeps the *other* pages' controls honest; when that one saw a transition first,
+this page compared the new state with itself and the cue was never sent — about one
+transition in six. `srvLastRunning` is read and replaced in one step after the
+`await`, so of two overlapping polls exactly one sees a given transition; it is kept
+across page visits, so a stop that happened while the admin was elsewhere still
+counts on the way back; and it is cleared only on a session switch.
+
 ### Two start forms: a jar, or the game's own script
 
 Plenty of servers are launched by a `start.sh` of their own — for JVM flags the

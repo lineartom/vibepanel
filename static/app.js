@@ -154,6 +154,7 @@ function clickSessionTab(tab, page) {
     sessionEpoch++;              // discard replies still in flight for the old server
     currentSession = tab;
     serverRunning  = null;
+    srvLastRunning = null;
     serverError    = null;
     jarsLoaded     = false;
     selectedJar    = null;
@@ -1452,9 +1453,22 @@ function srvStopPolling() {
   srvPollTimer = null;
 }
 
+// What this page last drew: true, false, or null before its first answer for
+// this server. It is what a start or stop is measured against, and it is this
+// page's own on purpose. The shared `serverRunning` is written by every caller
+// of fetchServerRunning() — including the 15 s poller that keeps the other
+// pages' controls honest — so when that one happened to see a transition
+// first, this page compared the new state with itself, found no change, and
+// never re-read the start form or the two policy notes. Roughly one transition
+// in six went missing that way.
+//
+// Kept across page visits, so a server that stopped while the admin was on
+// another page still counts as a transition on the way back. Cleared only on a
+// session switch.
+let srvLastRunning = null;
+
 async function loadServerStatus() {
   const card = $('srv-status-card');
-  const wasRunning = serverRunning;
   const data = await fetchServerRunning();
 
   if (data === STALE) return;   // reply was for the server we just left
@@ -1487,6 +1501,13 @@ async function loadServerStatus() {
     setStartFormDisabled(true);
     return;
   }
+  // Read and replaced in one step, *after* the await: two of these can be in
+  // flight at once (the timer, and the follow-up a Stop or Start schedules),
+  // and taken this way exactly one of them sees a given transition. An
+  // unreachable pane returned above without touching it — that is not a state
+  // the server was in.
+  const wasRunning = srvLastRunning;
+  srvLastRunning   = data.running;
   if (data.running) {
     // What it is running, read off the process itself: the jar, and the heap it
     // was given. Either can be unknown — a command line with no -jar, a -Xmx we
