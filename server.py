@@ -17,6 +17,7 @@ import sys
 import threading
 import urllib.parse
 import urllib.request
+import zlib
 from datetime import datetime, timedelta, date
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file, abort
 
@@ -3242,8 +3243,20 @@ def _activity_events_gz(gdir: str, filename: str, base_date: date) -> tuple[tupl
     hit = cache.get(filename)
     if hit and hit[0] == sig:
         return hit[1], False
-    with gzip.open(path, "rb") as fh:
-        blob = fh.read(ACTIVITY_GZ_MAX_BYTES).decode("utf-8", "replace")
+    try:
+        with gzip.open(path, "rb") as fh:
+            blob = fh.read(ACTIVITY_GZ_MAX_BYTES).decode("utf-8", "replace")
+    except (EOFError, zlib.error, gzip.BadGzipFile) as e:
+        # A damaged archive — cut short by a crash or a full disk while log4j
+        # was compressing it, most likely. None of these is an OSError (a
+        # truncated stream is EOFError, corrupt data zlib.error), so they used
+        # to escape the caller's handler and take the whole page down for as
+        # long as the file stayed inside the horizon. One unreadable day is not
+        # a reason to show none of them: the file contributes nothing, and the
+        # empty answer is cached like any other so it is neither re-read nor
+        # re-reported on every request.
+        print(f"activity: skipping {path} — cannot be read as gzip: {e or type(e).__name__}")
+        blob = ""
     result = _activity_dated(_parse_activity_log(blob), base_date)
     cache[filename] = (sig, result)
     return result, True

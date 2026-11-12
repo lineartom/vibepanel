@@ -890,6 +890,14 @@ and the worst race is a duplicate parse. The horizon is `ACTIVITY_DAYS` (14) by
 filename date, capped at `ACTIVITY_MAX_GZ_FILES`, and each request prunes the cache
 to the files it just listed so entries age out of memory with their files.
 
+A `.gz` that cannot be decompressed is **skipped, and the skip is cached** like a
+parse: it contributes no events, prints one line, and the rest of the history is
+shown. A file cut short while log4j was compressing it (a crash, a full disk) is
+the realistic case. The catch has to name `EOFError` and `zlib.error` — what a
+truncated or corrupt stream raises — because neither is an `OSError`; they used to
+sail past `_activity_report()`'s handler and 500 the Activity page and the
+Overview strip for the fourteen days the file took to age out.
+
 `latest.log` gets its own window (`ACTIVITY_LATEST_MAX_BYTES`, 8 MB), not
 `_read_log_tail()`'s 512 KB — a busy day exceeds that, and a join scrolled out of
 the window silently loses the whole stint. The one interval-builder consequence: a
