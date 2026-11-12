@@ -1079,6 +1079,70 @@ def _world_member(world_path: str) -> str:
     return "world/." if os.path.islink(world_path) else "world"
 
 
+_SCRATCH_RE = re.compile(r'\.world-(\d+)-\d+\.tgz\.tmp')
+
+
+def _open_scratch(saves_path: str) -> tuple:
+    """Somewhere for tar to write that is not yet an archive: (fd, path or None).
+
+    Preferably a file with **no name at all** — O_TMPFILE. It lives in the
+    worlds dir's filesystem, so it can be linked into place when it is
+    complete, but until then it is only an open descriptor, and the kernel
+    frees it the moment the last one closes. That is what makes a panel dying
+    mid-backup harmless: there is nothing left behind to clean up, because
+    there was never anything there to find. It holds even when tar outlives us
+    (KillMode=process lets it) — tar finishes writing into a file nobody can
+    name, exits, and the space comes back.
+
+    A named hidden file is the fallback where O_TMPFILE is not on offer: macOS,
+    NFS, some FUSE filesystems. That one *can* be orphaned, which is what
+    _sweep_scratch() is for.
+    """
+    flag = getattr(os, "O_TMPFILE", None)
+    if flag is not None:
+        try:
+            return os.open(saves_path, flag | os.O_RDWR, 0o666), None
+        except OSError:
+            pass
+    # Unique by writer rather than by name: two archivings can run at once (a
+    # Save alongside an on-stop backup) and must not tar over each other.
+    path = os.path.join(
+        saves_path, f".world-{os.getpid()}-{threading.get_ident()}.tgz.tmp")
+    return os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o666), path
+
+
+def _sweep_scratch(saves_path: str) -> None:
+    """Remove named scratch files left by a panel process that is gone.
+
+    Only the fallback in _open_scratch() makes these now, but every panel before
+    it did, and one killed or restarted mid-backup left a world-sized hidden
+    file that nothing listed, counted or removed. The name carries the pid of
+    the panel that made it; ours are in use, and one whose process is still
+    alive is left alone. If the dead panel's tar is somehow still writing,
+    unlinking the file under it is harmless — it finishes into nothing.
+    """
+    try:
+        names = os.listdir(saves_path)
+    except OSError:
+        return
+    for name in names:
+        m = _SCRATCH_RE.fullmatch(name)
+        if not m or int(m.group(1)) == os.getpid():
+            continue
+        try:
+            os.kill(int(m.group(1)), 0)
+            continue                    # that process exists: not ours to judge
+        except ProcessLookupError:
+            pass
+        except OSError:
+            continue                    # exists, as somebody else
+        try:
+            os.remove(os.path.join(saves_path, name))
+            print(f"removed abandoned backup scratch file {name} in {saves_path}")
+        except OSError:
+            pass
+
+
 def _archive_world(gdir: str, suffix: str = None) -> tuple:
     """Tar <gdir>/world into WORLDS_DIR as world-<ts>[-<suffix>].tgz.
 
@@ -1086,11 +1150,11 @@ def _archive_world(gdir: str, suffix: str = None) -> tuple:
     autosave before a Load, and the on-stop backup all come through here, so
     all three produce the same shape of file in the same place.
 
-    Tarred to a hidden `.tmp` and only then linked into place, the same
+    Tarred into a scratch file and only then linked into place, the same
     discipline as the state files: a tar that dies half way — the panel killed
     mid-backup, a full disk — must not leave a truncated archive sitting in the
     list looking loadable, because Load deletes the current world before
-    extracting one.
+    extracting one. See _open_scratch() for why the scratch file has no name.
 
     The name is claimed with os.link() rather than os.replace() because these
     names collide: they are second-resolution, and an automatic backup can land
@@ -1108,33 +1172,46 @@ def _archive_world(gdir: str, suffix: str = None) -> tuple:
 
     saves_path = os.path.join(gdir, WORLDS_DIR)
     os.makedirs(saves_path, exist_ok=True)
+    _sweep_scratch(saves_path)
 
     stamp    = datetime.now()
     def named(when):
         ts = when.strftime("%Y%m%d-%H%M%S")
         return f"world-{ts}-{suffix}.tgz" if suffix else f"world-{ts}.tgz"
 
-    # Hidden, and made unique by writer rather than by name: the whole reason
-    # for the loop below is that two archivings can pick the same name in the
-    # same second, and those two must not then also share a scratch file and tar
-    # over each other. The server is stopped while an on-stop backup runs, so
-    # the Worlds page's Save is live at the time and this overlap is reachable.
-    tmp_path = os.path.join(
-        saves_path, f".world-{os.getpid()}-{threading.get_ident()}.tgz.tmp")
+    fd, tmp_path = _open_scratch(saves_path)
     try:
+        # To stdout, which is the scratch file: tar never learns a name for it.
         subprocess.run(
-            ["tar", "-czf", tmp_path, "-C", gdir, _world_member(world_path)],
-            check=True, capture_output=True, text=True,
+            ["tar", "-czf", "-", "-C", gdir, _world_member(world_path)],
+            check=True, stdout=fd, stderr=subprocess.PIPE, text=True,
         )
+        size = os.fstat(fd).st_size
+        # A nameless file is linked by way of its descriptor: /proc/self/fd/N
+        # is a symlink to it, and os.link() follows symlinks (linkat with
+        # AT_SYMLINK_FOLLOW) — the documented way to give an O_TMPFILE a name.
+        src = tmp_path or f"/proc/self/fd/{fd}"
         for _ in range(60):
             filename = named(stamp)
             out_path = os.path.join(saves_path, filename)
             try:
-                os.link(tmp_path, out_path)
+                os.link(src, out_path)
                 break
             except FileExistsError:
                 stamp += timedelta(seconds=1)
             except OSError:
+                if tmp_path is None:
+                    # No /proc to link through. Rather than throw away a world's
+                    # worth of tar, copy it to a named scratch file and carry on
+                    # down the ordinary path.
+                    tmp_path = os.path.join(
+                        saves_path,
+                        f".world-{os.getpid()}-{threading.get_ident()}.tgz.tmp")
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    with os.fdopen(os.dup(fd), "rb") as rd, open(tmp_path, "wb") as wr:
+                        shutil.copyfileobj(rd, wr, 1 << 20)
+                    src = tmp_path
+                    continue
                 # A filesystem without hard links. Fall back to the rename, and
                 # keep the no-clobber promise as best a check can.
                 if os.path.exists(out_path):
@@ -1145,11 +1222,10 @@ def _archive_world(gdir: str, suffix: str = None) -> tuple:
         else:
             raise FileExistsError(f"no free name for {named(stamp)}")
     finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-    return filename, os.path.getsize(out_path)
+        os.close(fd)
+        if tmp_path:
+            _remove_quietly(tmp_path)
+    return filename, size
 
 
 def _stop_backup_state(session: str) -> dict:
@@ -3890,7 +3966,7 @@ def api_worlds_download():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     # Only finished archives carry this name — _archive_world() writes to a
-    # hidden .tmp and links it into place — so nothing here can be half-written.
+    # scratch file and links it into place — so nothing here can be half-written.
     file_path = os.path.join(gdir, WORLDS_DIR, filename)
     if not os.path.isfile(file_path):
         return jsonify({"ok": False, "error": "File not found"}), 404

@@ -680,11 +680,29 @@ it was, and the restored world is an ordinary directory in the game dir — the
 response carries `unlinked` and the page says so. An admin who wants the world back
 on the other disk moves it and re-links it; the panel will not guess at that.
 
-Tar writes to a hidden `.tmp` first. A tar that dies half way — the panel killed
-mid-backup, a full disk — must not leave a truncated archive in the list looking
-loadable, because Load deletes the current world *before* extracting.
+Tar writes into a scratch file first, never under the archive's own name. A tar
+that dies half way — the panel killed mid-backup, a full disk — must not leave a
+truncated archive in the list looking loadable, because Load deletes the current
+world *before* extracting.
 
-The final name is then claimed with `os.link()`, not `os.replace()`. These names
+**The scratch file has no name** (`_open_scratch()`): it is opened with `O_TMPFILE`
+in the worlds dir and tar writes to it as stdout. Until it is linked into place it
+exists only as an open descriptor, so the kernel frees it when the last one closes
+— there is nothing to clean up after a panel that dies mid-backup, because there
+was never anything there to find. That includes the awkward case `KillMode=process`
+creates, where tar *outlives* the panel: it finishes writing a file nobody can
+name, exits, and the space comes back. The previous hidden `.tmp` did not survive
+that; each interrupted backup left a world-sized file that nothing listed, counted
+or removed.
+
+A named `.world-<pid>-<tid>.tgz.tmp` remains as the fallback where `O_TMPFILE` is
+not on offer (macOS, NFS, some FUSE mounts). `_sweep_scratch()` runs before every
+archive and removes any whose pid is no longer a live process — which also clears
+out what earlier versions of the panel left behind.
+
+The final name is then claimed with `os.link()`, not `os.replace()` — for the
+nameless file by way of `/proc/self/fd/<n>`, which `link()` follows; that is the
+documented way to give an `O_TMPFILE` a name. These names
 are second-resolution and they do collide: an automatic backup can land in the
 same second as a hand-pressed Save (it happened on the first test run of this
 feature, and `replace()` silently destroyed the older archive). `link()` fails
