@@ -1202,6 +1202,34 @@ and ignores `TMPDIR`; `$TMPDIR` is checked too only because macOS puts it there.
 `-XX:+PerfDisableSharedMem` (common in containers) or `-XX:-UsePerfData` removes the
 file altogether, which is the "no counter file" message.
 
+### Finding the file is not trusting it
+
+`/tmp` is everybody's. Any local user can create `/tmp/hsperfdata_x/<pid>` — as a
+file of invented figures, a symlink to `/dev/zero`, or a fifo — and `glob` returns
+candidates in no particular order, so theirs could be the one found. The read used
+to be unbounded and to follow links: the `/dev/zero` case ran the panel out of
+memory, on a host where the thing most likely to be killed for that is the game.
+
+So `_read_hsperf()` only reads a candidate that is what a JVM would have made — the
+same checks HotSpot applies to its own directory before using it:
+
+| | must be |
+|---|---|
+| the directory | a real directory, not a link; owned by the JVM's user; not writable by group or other |
+| the file | a regular file, not a link; owned by that same user; at most `HSPERF_MAX_BYTES` (4 MB — the real thing is 32 KB) |
+
+"The JVM's user" is whoever owns `/proc/<pid>` (`_proc_uid()`). The panel's own uid
+is accepted as well, for a host with no `/proc` and for a JVM whose `/proc` entry is
+root-owned because the process is not dumpable; neither is a user a stranger can
+create files as. The file is opened *through* the directory's descriptor
+(`dir_fd=`), with `O_NOFOLLOW`, and judged by `fstat` on what was actually opened,
+so nothing can be swapped between the check and the read; `O_NONBLOCK` is what makes
+opening a fifo return rather than wait.
+
+Anything that fails a check is skipped as though it were not there, with one
+exception: a `PermissionError` on the file inside a directory that *passed* is the
+genuine file of a server running as another user, and is reported as such.
+
 ### Host peaks, the refresh rate, and Reset Peaks
 
 The host bars carry the same notch, fed by `peak` fields that `/api/system/stats` now

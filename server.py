@@ -12,6 +12,7 @@ import ipaddress
 import shlex
 import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -2505,29 +2506,95 @@ _GEN_MAX_RE   = re.compile(r"sun\.gc\.generation\.\d+\.maxCapacity")
 _GC_INVOC_RE  = re.compile(r"sun\.gc\.collector\.\d+\.invocations")
 
 
-def _hsperf_path(pid: int) -> str | None:
-    """Locate a JVM's performance-counter file, or None if it has none.
+# A counter file is 32 KB by default (-XX:PerfDataMemorySize). The cap is far
+# above anything a JVM is configured with and far below anything that hurts.
+HSPERF_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _proc_uid(pid: int) -> int | None:
+    """The user a process runs as, from who owns /proc/<pid>; None without /proc."""
+    try:
+        return os.stat(f"/proc/{pid}").st_uid
+    except OSError:
+        return None
+
+
+def _read_hsperf(pid: int) -> bytes | None:
+    """A JVM's performance-counter file, as bytes, or None if it has none.
 
     HotSpot hardcodes /tmp for this on Linux — it ignores TMPDIR — so /tmp is
     what matters in deployment; $TMPDIR is checked as well only because macOS
     puts it there and the panel gets developed on one. The directory is named
-    for the *JVM's* user rather than ours, so it is globbed, not assumed. A
-    server running as someone else is found that way too, and then not read:
-    the file is 0600 and the panel is never root (see _refuse_root), which is
-    the "counter file is not readable" answer.
+    for the *JVM's* user rather than ours, so it is globbed, not assumed.
+
+    /tmp is everybody's, which is why finding a file there is not the same as
+    trusting it: any local user can make /tmp/hsperfdata_x/<pid>, as a file of
+    invented figures, a symlink to /dev/zero (an unbounded read used to follow
+    it until the panel ran out of memory) or a fifo that never answers. glob
+    returns candidates in no particular order, so theirs could come first. A
+    candidate is therefore only read if it is what a JVM would have made, the
+    checks HotSpot applies to its own directory before using it:
+
+      the directory   a real directory, not a link; owned by the JVM's user;
+                      not writable by group or other
+      the file        a regular file, not a link, owned by that same user, and
+                      no bigger than HSPERF_MAX_BYTES
+
+    "The JVM's user" is whoever owns /proc/<pid> — and our own uid is accepted
+    too, for hosts with no /proc and for a JVM whose /proc entry is root-owned
+    because it is not dumpable. Neither is a user a stranger can make files as.
+    The file is opened *through* the directory's descriptor, without following
+    links, and checked by fstat on what was actually opened, so nothing can be
+    swapped between the check and the read.
+
+    Raises PermissionError when the genuine file exists and is not ours to
+    read: a server running as another user, the panel never being root (see
+    _refuse_root). Raises ValueError for one that is absurdly large.
     """
+    owners = {uid for uid in (_proc_uid(pid), os.geteuid()) if uid is not None}
     roots = ["/tmp"]
     tmp = os.environ.get("TMPDIR")
     if tmp:
         roots.append(tmp)
+
     for root in roots:
-        for path in glob.glob(os.path.join(root, "hsperfdata_*", str(pid))):
-            return path
+        for dirpath in glob.glob(os.path.join(root, "hsperfdata_*")):
+            try:
+                dfd = os.open(dirpath, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            except OSError:
+                continue            # a link, not a directory, or closed to us
+            try:
+                d = os.fstat(dfd)
+                if d.st_uid not in owners or d.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+                    continue        # somebody else's, or open to somebody else
+                try:
+                    # O_NONBLOCK so that opening a fifo returns instead of
+                    # waiting for a writer; it means nothing to a regular file.
+                    fd = os.open(str(pid), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                 dir_fd=dfd)
+                except FileNotFoundError:
+                    continue        # this user has JVMs, just not this one
+                except PermissionError:
+                    raise           # the real one, and not ours to read
+                except OSError:
+                    continue        # a link where the file should be
+                try:
+                    f = os.fstat(fd)
+                    if not stat.S_ISREG(f.st_mode) or f.st_uid != d.st_uid:
+                        continue
+                    if f.st_size > HSPERF_MAX_BYTES:
+                        raise ValueError(f"{f.st_size} bytes is not a counter file")
+                    with os.fdopen(os.dup(fd), "rb") as fh:
+                        return fh.read(HSPERF_MAX_BYTES)
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(dfd)
     return None
 
 
-def _read_perf_counters(path: str) -> dict:
-    """Parse an hsperfdata file into {counter name: value}.
+def _parse_perf_counters(buf: bytes) -> dict:
+    """Parse an hsperfdata file's bytes into {counter name: value}.
 
     The format is a documented binary that has been at version 2.0 since Java 5:
     a 32-byte prologue, then `num_entries` variable-length entries, each holding
@@ -2539,8 +2606,6 @@ def _read_perf_counters(path: str) -> dict:
     written a few microseconds apart. Individual counters are aligned 64-bit
     words and can't tear; a gauge does not care about the rest.
     """
-    with open(path, "rb") as fh:
-        buf = fh.read()
     if len(buf) < 32 or struct.unpack_from(">I", buf, 0)[0] != _PERF_MAGIC:
         raise ValueError("not an hsperfdata file")
     byte_order, major, _minor, accessible = buf[4:8]
@@ -2606,12 +2671,12 @@ def _read_heap(pid: int) -> tuple[dict | None, str | None]:
     spends much of its time near the maximum by design, so a peak taken from it
     saturates within minutes and stops saying anything.
     """
-    path = _hsperf_path(pid)
-    if not path:
-        return None, ("no counter file for this JVM — started with "
-                      "-XX:+PerfDisableSharedMem or -XX:-UsePerfData?")
     try:
-        counters = _read_perf_counters(path)
+        buf = _read_hsperf(pid)
+        if buf is None:
+            return None, ("no counter file for this JVM — started with "
+                          "-XX:+PerfDisableSharedMem or -XX:-UsePerfData?")
+        counters = _parse_perf_counters(buf)
     except PermissionError:
         return None, "counter file is not readable — the server runs as another user"
     except (OSError, ValueError, struct.error) as e:
