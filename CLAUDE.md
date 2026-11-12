@@ -1327,6 +1327,14 @@ and a newline reaching `send-keys` is typed as Enter, ending our command line an
 running whatever follows it. Today `.strip()` removes it first; `fullmatch` means
 the safety doesn't depend on that staying put.
 
+That is now the rule for **every** pattern that validates a whole string, not only
+the ones headed for the pane: they are written without `^…$` and called with
+`fullmatch()`. World-save and mod filenames, player names, UUIDs and the log
+markers all used `match()` with a `$` and accepted a trailing newline — harmless
+only because each happened to sit behind a `.strip()` or a `splitlines()`.
+`match()` survives in one place, `_LOG_LINE_TIME_RE`, where a prefix is what is
+wanted.
+
 That set is wider than the strict minimum — with the separators gone, a lone `(`
 only yields a bash syntax error — but the safety of the narrower list depends on
 our line always beginning with `say `/`ban `, which is a fragile thing to rely on.

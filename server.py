@@ -369,7 +369,15 @@ def tmux_pane_path(target: str = None) -> str:
     return result.stdout.strip()
 
 
-_WORLD_SAVE_RE = re.compile(r'^world-\d{8}-\d{6}(?:-[a-zA-Z0-9_-]+)?\.tgz$')
+# Every pattern in this file that validates a whole string is written without
+# ^…$ and used with fullmatch(), never match(). Python's `$` also matches just
+# before a trailing newline, so `^\d+[MG]$` accepts "1024M\n" — and a newline is
+# the one character that matters most here, being Enter at a pane and a line
+# break in a log. A .strip() upstream usually removes it; fullmatch means the
+# check does not depend on that staying put. match() is kept only where a
+# *prefix* is what is wanted (_LOG_LINE_TIME_RE).
+_WORLD_SAVE_RE = re.compile(r'world-\d{8}-\d{6}(?:-[a-zA-Z0-9_-]+)?\.tgz')
+_AUTOSAVE_RE   = re.compile(r'world-\d{8}-\d{6}-autosave\.tgz')
 
 
 _PRIV_WRAPPERS = ("su", "sudo", "doas")
@@ -1841,7 +1849,7 @@ LATEST_LOG     = "latest.log"
 
 # Geyser (Bedrock clients on a Java server) if the admin has installed it.
 GEYSER_CONFIG = os.path.join("config", "Geyser-Fabric", "config.yml")
-_YAML_KEY_RE  = re.compile(r'^(\s*)([A-Za-z0-9_.-]+):\s*(.*?)\s*$')
+_YAML_KEY_RE  = re.compile(r'(\s*)([A-Za-z0-9_.-]+):\s*(.*?)\s*')
 
 # The suggestion and last-run readers below read only the tail of
 # logs/latest.log: stitching together the tails of several files would mean
@@ -1851,10 +1859,10 @@ _YAML_KEY_RE  = re.compile(r'^(\s*)([A-Za-z0-9_.-]+):\s*(.*?)\s*$')
 # cache — see "# ── Play activity ──".
 LOG_SCAN_MAX_BYTES = 512 * 1024
 
-_MC_NAME_RE   = re.compile(r'^[A-Za-z0-9_]{1,16}$')
-_UUID_HEX_RE  = re.compile(r'^[0-9a-fA-F]{32}$')
+_MC_NAME_RE   = re.compile(r'[A-Za-z0-9_]{1,16}')
+_UUID_HEX_RE  = re.compile(r'[0-9a-fA-F]{32}')
 _UUID_DASH_RE = re.compile(
-    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 )
 
 # "[12:34:56] [User Authenticator #1/INFO]: UUID of player Notch is 069a79f4-…"
@@ -1876,9 +1884,9 @@ _LOG_LINE_TIME_RE = re.compile(r'^\[(\d{2}:\d{2}:\d{2})')
 def _normalize_uuid(raw) -> str | None:
     """Return a canonical dashed lowercase UUID, or None if unparseable."""
     s = str(raw or "").strip().lower()
-    if _UUID_DASH_RE.match(s):
+    if _UUID_DASH_RE.fullmatch(s):
         return s
-    if _UUID_HEX_RE.match(s):
+    if _UUID_HEX_RE.fullmatch(s):
         return f"{s[0:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:]}"
     return None
 
@@ -1968,7 +1976,7 @@ def _read_bedrock_port(gdir: str) -> int:
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for line in fh:
-                m = _YAML_KEY_RE.match(line.split("#", 1)[0].rstrip())
+                m = _YAML_KEY_RE.fullmatch(line.split("#", 1)[0].rstrip())
                 if not m:
                     continue
                 indent, key, val = m.groups()
@@ -2037,7 +2045,7 @@ def _scan_latest_log(gdir: str) -> list:
             continue
         name = hit.group(1)
         uuid = _normalize_uuid(hit.group(2))
-        if uuid and _MC_NAME_RE.match(name):
+        if uuid and _MC_NAME_RE.fullmatch(name):
             hits.append((day, stamp, name, uuid))
 
     last_day = day
@@ -2090,7 +2098,7 @@ def _parse_player_body(target: str):
     """
     data = _json_body()
     name = str(data.get("name", "")).strip()
-    if not _MC_NAME_RE.match(name):
+    if not _MC_NAME_RE.fullmatch(name):
         return None, (jsonify({"ok": False, "error": "Invalid player name"}), 400)
 
     raw_uuid = str(data.get("uuid", "")).strip()
@@ -2880,7 +2888,7 @@ def api_server_start():
 # Note "All dimensions are saved" is deliberately *not* a marker: `/save-all
 # flush` takes the same branch, and backup plugins run it on a timer, so a crash
 # after one would read as a deliberate stop.
-_STOP_ASKED_RE = re.compile(r'^(?:\[[^\[\]]{1,64}: )?Stopping the server\.{0,3}\]?$')
+_STOP_ASKED_RE = re.compile(r'(?:\[[^\[\]]{1,64}: )?Stopping the server\.{0,3}\]?')
 _STOP_ORDERLY  = "Stopping server"
 _RUN_STARTED   = "Starting minecraft server version"
 
@@ -3001,7 +3009,7 @@ def _last_run_ending(gdir: str) -> tuple:
         msg = line.partition("]: ")[2]
         if msg.startswith(_RUN_STARTED):
             asked = orderly = crashed = False
-        elif _STOP_ASKED_RE.match(_log_broadcast(msg)):
+        elif _STOP_ASKED_RE.fullmatch(_log_broadcast(msg)):
             asked = True
         elif msg == _STOP_ORDERLY:
             orderly = True
@@ -3292,7 +3300,7 @@ ACTIVITY_CLUSTER_GAP_SECS = 15 * 60   # bridged when clustering, so a mid-evenin
 ACTIVITY_LATEST_MAX_BYTES = 8 * 1024 * 1024
 ACTIVITY_GZ_MAX_BYTES     = 16 * 1024 * 1024
 
-_GZ_LOG_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})-(\d+)\.log\.gz$')
+_GZ_LOG_RE = re.compile(r'(\d{4})-(\d{2})-(\d{2})-(\d+)\.log\.gz')
 
 # Matched with fullmatch against the message *body* after the "]: " split and
 # after _log_broadcast() strips the version's "System chat: " label, the
@@ -3303,8 +3311,8 @@ _GZ_LOG_RE = re.compile(r'^(\d{4})-(\d{2})-(\d{2})-(\d+)\.log\.gz$')
 # timeout, quit), and "lost connection" without it only happens for a player
 # who never finished joining — who never opened an interval. Crashes log
 # neither line and are handled by the force-close at the next start marker.
-_JOINED_RE = re.compile(r'^([A-Za-z0-9_]{1,16}) joined the game$')
-_LEFT_RE   = re.compile(r'^([A-Za-z0-9_]{1,16}) left the game$')
+_JOINED_RE = re.compile(r'([A-Za-z0-9_]{1,16}) joined the game')
+_LEFT_RE   = re.compile(r'([A-Za-z0-9_]{1,16}) left the game')
 
 # gdir -> {filename: ((size, mtime), (events, last_epoch))} for the rotated
 # logs, and gdir -> ((size, mtime), (events, last_epoch)) for latest.log.
@@ -3386,7 +3394,7 @@ def _activity_log_files(gdir: str) -> list[tuple[str, date]]:
         return []
     cutoff, found = date.today() - timedelta(days=ACTIVITY_DAYS), []
     for name in names:
-        m = _GZ_LOG_RE.match(name)
+        m = _GZ_LOG_RE.fullmatch(name)
         if not m:
             continue
         try:
@@ -3901,7 +3909,7 @@ def _load_world(target: str):
     data     = _json_body()
     filename = str(data.get("filename", "")).strip()
 
-    if not _WORLD_SAVE_RE.match(filename):
+    if not _WORLD_SAVE_RE.fullmatch(filename):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
 
     try:
@@ -3971,7 +3979,7 @@ def api_worlds_delete():
     data     = _json_body()
     filename = str(data.get("filename", "")).strip()
 
-    if not _WORLD_SAVE_RE.match(filename):
+    if not _WORLD_SAVE_RE.fullmatch(filename):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
 
     try:
@@ -3998,7 +4006,7 @@ def api_worlds_download():
 
     # Same gate as Load/Delete: the name must be one of ours, so a request
     # can only pick an archive in WORLDS_DIR and never contributes a path.
-    if not _WORLD_SAVE_RE.match(filename):
+    if not _WORLD_SAVE_RE.fullmatch(filename):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
 
     try:
@@ -4032,7 +4040,7 @@ def api_worlds_delete_autosaves():
     deleted = 0
     errors  = []
     for f in os.listdir(saves_path):
-        if re.match(r'^world-\d{8}-\d{6}-autosave\.tgz$', f):
+        if _AUTOSAVE_RE.fullmatch(f):
             try:
                 os.remove(os.path.join(saves_path, f))
                 deleted += 1
