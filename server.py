@@ -4137,6 +4137,11 @@ def api_mods_deactivate():
 def api_mods_delete():
     """Delete a mod from 'active', 'inactive', or 'both' locations."""
     target   = _session_target()
+    # The same rule as activate, deactivate and update. The page only offers
+    # this from the conflict notice, which a running server never reaches, but
+    # the endpoint is what enforces it.
+    if _is_running(target):
+        return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
     data     = _json_body()
     filename = str(data.get("filename", "")).strip()
     location = str(data.get("location", "")).strip()
