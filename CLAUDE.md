@@ -37,6 +37,7 @@ later can move the store.
 | `--mods-saves-dir` | `MODS_SAVES_DIR` | `mods-saves` | inactive (stashed) mods directory |
 | `--host` | — | `0.0.0.0` | bind address |
 | `--port` | — | `8080` | bind port |
+| `--allowed-host` | `ALLOWED_HOSTS` (comma-separated) | *(none)* | a DNS name the panel is reached by, when that is not this machine's own hostname; **repeat** for several. See "Who may talk to the panel" |
 
 ## tmux session detection
 
@@ -1201,6 +1202,66 @@ accepted if `_resolve_start_script()` finds it as an executable plain file resol
 inside the game dir, and control characters are rejected outright, because a newline
 would be typed as Enter no matter how the rest is quoted. See the start-forms section
 above for the full list.
+
+## Who may talk to the panel
+
+The panel has no login: whoever can reach the port is the admin. "Who can reach
+it" is therefore the whole of its access control, and a browser is a way of
+reaching it that the network cannot see — any page open in a browser that can
+reach the panel can ask that browser to send it requests. Binding to a Tailscale
+address does nothing about that, because the request comes from the admin's own
+machine.
+
+One `before_request` hook (`_guard_request()`, deciding in `_request_refusal()`)
+applies three rules to **every** route — page, static file and API alike — so an
+endpoint added later is covered without anyone remembering to:
+
+| rule | what it stops | why it works |
+|---|---|---|
+| `Host` must name this machine | DNS rebinding: a page that points its own name at our address is *same-origin* to the browser, so nothing else in the request distinguishes it | the `Host` header still carries the attacker's name |
+| `Origin`, when present, must be the origin the request was sent to | a cross-site POST | every browser sends `Origin` with one |
+| anything that is not a GET must carry `X-VibePanel` | the same, in a browser old or odd enough to omit `Origin` | a page on another origin cannot add a header of its own without a CORS preflight, and the panel never grants one |
+
+`_host_allowed()` accepts an IP literal (there is no name there to rebind),
+`localhost`, the machine's own hostname, and whatever `--allowed-host` adds — a
+leading dot matches subdomains, and `*` turns the check off. It fails closed, and
+the 403 names the flag to pass, because the alternative to an admin reading that
+message is an admin who cannot work out why their MagicDNS name stopped working.
+
+`Sec-Fetch-Site` says what `Origin` says more precisely, and is checked when it is
+there — but **browsers only send it to https and localhost**, and the usual
+deployment is plain http on a tailnet address. It is a bonus, never the mechanism.
+Where it is present, the one cross-site request allowed is following a link to the
+page itself: a top-level `GET` of a non-`/api/` path. Never a frame, never a
+subresource.
+
+Two things follow from this for anyone adding an endpoint:
+
+- **GET must not change anything.** Nothing above can stop a cross-site GET from
+  being *sent* over plain http — an `<img src>` carries nothing that tells it from
+  our own request. That is why `/api/players` is a POST: it types `list` at the
+  pane. What a GET may still do is be wasteful (`/api/mods/updates` asks Modrinth),
+  and the response headers keep its answer from reaching the page that asked.
+- **Read the body with `_json_body()`, never `get_json(force=True)`.** `force` reads
+  any body as JSON, and `text/plain` is exactly what a cross-site form *can* send.
+  The hook refuses a non-JSON body with 415 before the route runs; `_json_body()`
+  is the second lock, and also turns a body of `[]` into "no fields" rather than an
+  `AttributeError`.
+
+On the client, `apiFetch()` is the only caller of `fetch()` and adds the header to
+everything that is not a GET. A bare `fetch()` POST is refused, which is the point.
+
+`_harden_response()` puts the same headers on every response: a
+`Content-Security-Policy` that allows only our own script (the page has no inline
+script and loads nothing from elsewhere, so it can simply say so — `'unsafe-inline'`
+is for *styles* only, which the bars and timelines are positioned with), `nosniff`,
+`frame-ancestors 'none'` / `X-Frame-Options`, and `Cross-Origin-Resource-Policy`.
+The CSP is defence in depth behind `esc()`: it is what turns a missed escape in
+`app.js` from script execution into a rendering glitch.
+
+A reverse proxy in front of the panel must pass `Host` through unchanged; one that
+rewrites it makes every `Origin` look foreign. `X-Forwarded-Host` is deliberately
+ignored — a rebinding page can send any header it likes.
 
 ## External network access
 

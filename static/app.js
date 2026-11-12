@@ -63,6 +63,18 @@ let currentSession = '';
 // 'overview' or a session name — tracks which tab is highlighted
 let activeTab      = 'overview';
 
+// Every request the page makes goes through here. Anything that is not a GET
+// gets the header the panel insists on for requests that change something: a
+// page on another origin cannot add a header of its own without the browser
+// asking the panel first, and the panel never agrees. See "Who may talk to the
+// panel" in CLAUDE.md. Use this, never bare fetch() — a POST without the header
+// is refused.
+function apiFetch(url, opts = {}) {
+  const method = (opts.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD') return fetch(url, opts);
+  return fetch(url, { ...opts, headers: { ...(opts.headers || {}), 'X-VibePanel': '1' } });
+}
+
 // Appends ?s=<session> to API paths when multiple sessions are configured.
 function api(path) {
   if (sessions.length <= 1) return path;
@@ -83,14 +95,14 @@ const STALE = Symbol('stale-session');
 // still throw, so existing catch blocks keep working.
 async function sessionJson(path, opts) {
   const epoch = sessionEpoch;
-  const res   = await fetch(api(path), opts);
+  const res   = await apiFetch(api(path), opts);
   const data  = await res.json();
   return epoch === sessionEpoch ? data : STALE;
 }
 
 async function loadSessions() {
   try {
-    const res  = await fetch('/api/sessions');
+    const res  = await apiFetch('/api/sessions');
     const data = await res.json();
     sessions       = data.sessions || [];
     currentSession = sessions[0] || '';
@@ -432,7 +444,7 @@ async function loadOnline() {
   if (serverRunning === false) { onlineData = null; renderOnline(); return; }
   $('players-online').innerHTML = '<p class="hint">Querying server…</p>';
   try {
-    const data = await sessionJson('/api/players');
+    const data = await sessionJson('/api/players', { method: 'POST' });
     if (data === STALE) return;          // switched servers mid-request
     onlineData = data;
   } catch (err) {
@@ -907,7 +919,7 @@ let cachedSystemStats = null;
 
 async function loadSystemStats() {
   try {
-    const res  = await fetch('/api/system/stats');
+    const res  = await apiFetch('/api/system/stats');
     const data = await res.json();
     if (data.ok) cachedSystemStats = data;
   } catch (_) {}
@@ -1020,7 +1032,7 @@ async function loadOverview() {
   const targets = sessions.length ? sessions : [currentSession];
   const statuses = await Promise.all(targets.map(async s => {
     try {
-      const res  = await fetch(`/api/server/status?s=${encodeURIComponent(s)}`);
+      const res  = await apiFetch(`/api/server/status?s=${encodeURIComponent(s)}`);
       const data = await res.json();
       overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar, playerCount: null, playersLoaded: false };
       if (!data.running) overviewCache[s].heap = null;
@@ -1035,7 +1047,7 @@ async function loadOverview() {
   await Promise.all(targets.filter(s => overviewCache[s]?.running).map(async s => {
     const players = (async () => {
       try {
-        const res  = await fetch(`/api/players?s=${encodeURIComponent(s)}`);
+        const res  = await apiFetch(`/api/players?s=${encodeURIComponent(s)}`, { method: 'POST' });
         const data = await res.json();
         overviewCache[s].playerCount  = data.ok ? data.count  : null;
         overviewCache[s].playerMax    = data.ok ? data.max    : null;
@@ -1055,7 +1067,7 @@ async function loadOverview() {
 async function fetchHeap(session) {
   let heap = null;
   try {
-    const res = await fetch(`/api/server/heap?s=${encodeURIComponent(session)}`);
+    const res = await apiFetch(`/api/server/heap?s=${encodeURIComponent(session)}`);
     heap = await res.json();
   } catch { /* leave heap null: card simply shows no bar */ }
   if (overviewCache[session]) overviewCache[session].heap = heap;
@@ -1066,7 +1078,7 @@ async function refreshOverviewStatus() {
   const targets = sessions.length ? sessions : [currentSession];
   await Promise.all(targets.map(async s => {
     try {
-      const res  = await fetch(`/api/server/status?s=${encodeURIComponent(s)}`);
+      const res  = await apiFetch(`/api/server/status?s=${encodeURIComponent(s)}`);
       const data = await res.json();
       const wasRunning = overviewCache[s]?.running;
       overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar };
@@ -1076,7 +1088,7 @@ async function refreshOverviewStatus() {
       if (!wasRunning && data.running) {
         overviewCache[s].playerCount   = null;
         overviewCache[s].playersLoaded = false;
-        fetch(`/api/players?s=${encodeURIComponent(s)}`)
+        apiFetch(`/api/players?s=${encodeURIComponent(s)}`, { method: 'POST' })
           .then(r => r.json())
           .then(d => {
             if (overviewCache[s]) {
@@ -1193,7 +1205,7 @@ async function loadOverviewActivity() {
   const targets = sessions.length ? sessions : [currentSession];
   await Promise.all(targets.map(async s => {
     try {
-      const res = await fetch(`/api/activity?s=${encodeURIComponent(s)}`);
+      const res = await apiFetch(`/api/activity?s=${encodeURIComponent(s)}`);
       overviewActivity[s] = await res.json();
     } catch (err) {
       overviewActivity[s] = { ok: false, error: err.message };
@@ -1327,7 +1339,7 @@ $('btn-reset-peaks').addEventListener('click', async () => {
   const btn = $('btn-reset-peaks');
   btn.disabled = true;
   try {
-    await fetch('/api/peaks/reset', { method: 'POST' });
+    await apiFetch('/api/peaks/reset', { method: 'POST' });
   } catch { /* nothing to undo: a failed reset just leaves the old peaks */ }
   btn.disabled = false;
   // Peaks are recorded server-side as a side effect of sampling, so the way to
@@ -1520,7 +1532,7 @@ async function stopServer() {
   btn.disabled = true;
   btn.textContent = 'Stopping…';
   try {
-    await fetch(api('/api/server/stop'), { method: 'POST' });
+    await apiFetch(api('/api/server/stop'), { method: 'POST' });
   } catch (_) { /* poll will surface any error */ }
   setTimeout(loadServerStatus, 2000);
 }

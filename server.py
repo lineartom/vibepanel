@@ -10,6 +10,7 @@ import argparse
 import ipaddress
 import shlex
 import shutil
+import socket
 import struct
 import subprocess
 import threading
@@ -62,6 +63,172 @@ def _detect_version() -> str:
 
 
 VERSION = _detect_version()
+
+
+# ── Who may talk to the panel ────────────────────────────────────────────────
+#
+# The panel has no login: whoever can reach the port is the admin. That makes
+# "who can reach it" the whole of its access control, and a browser is a way of
+# reaching it that the network cannot see — any page open in a browser that can
+# reach the panel can ask that browser to send it requests. Three rules close
+# that, applied to every route by one before_request hook so that an endpoint
+# added later is covered without anyone remembering to:
+#
+#   Host        must name this machine. A page that rebinds its own DNS name to
+#               our address is same-origin as far as the browser is concerned,
+#               so nothing sent by the browser can tell it from ours — except
+#               that the Host header still carries *its* name. An IP literal is
+#               always fine: there is no name there to rebind.
+#   Origin      when present, must be the origin the request was sent to. Every
+#               browser sends it with a cross-origin POST. Sec-Fetch-Site says
+#               the same thing more precisely, but browsers only send it to
+#               https and localhost, so it is checked when present and never
+#               relied on.
+#   X-VibePanel anything that is not a GET must carry this header. A page on
+#               another origin cannot add a header of its own without the
+#               browser first asking us (a CORS preflight), and we never say
+#               yes. The value does not matter; being able to send it does.
+#
+# What this cannot do is stop a cross-site GET from being *sent* over plain
+# http: the browser attaches nothing to an <img src> that would tell it from
+# our own. So GET stays read-only — which is why /api/players, which types
+# `list` at the pane, is a POST — and the response headers below keep the
+# answer from being handed to the page that asked.
+
+# Extra names the panel answers to, from --allowed-host / ALLOWED_HOSTS. A
+# leading dot matches any subdomain; "*" turns the Host check off.
+ALLOWED_HOSTS  = {h.strip().lower().rstrip(".")
+                  for h in os.environ.get("ALLOWED_HOSTS", "").split(",") if h.strip()}
+REQUEST_HEADER = "X-VibePanel"
+
+
+def _own_hostnames() -> set:
+    """This machine's own name, long and short. Read once, at import."""
+    try:
+        name = socket.gethostname().lower().rstrip(".")
+    except OSError:
+        return set()
+    return {n for n in (name, name.split(".")[0]) if n}
+
+
+_OWN_HOSTNAMES = _own_hostnames()
+_HOST_HEADER_RE = re.compile(r'[A-Za-z0-9.\-:\[\]]{1,255}')
+
+
+def _host_allowed(host_header) -> bool:
+    """Whether a Host header names this panel. See the note above."""
+    host_header = str(host_header or "").strip()
+    if not _HOST_HEADER_RE.fullmatch(host_header):
+        return False
+    try:
+        name = urllib.parse.urlsplit("//" + host_header).hostname
+    except ValueError:
+        return False
+    if not name:
+        return False
+    name = name.rstrip(".")
+    try:
+        ipaddress.ip_address(name)
+        return True                 # an address, not a name: nothing to rebind
+    except ValueError:
+        pass
+    if name == "localhost" or name.endswith(".localhost") or name in _OWN_HOSTNAMES:
+        return True
+    if "*" in ALLOWED_HOSTS or name in ALLOWED_HOSTS:
+        return True
+    return any(a.startswith(".") and name.endswith(a) for a in ALLOWED_HOSTS)
+
+
+def _request_refusal(method: str, path: str, headers, has_body: bool = False,
+                     is_json: bool = False) -> tuple | None:
+    """Why a request is refused, as (status, message), or None if it may pass.
+
+    Kept free of Flask so the policy can be read, and tested, as one function.
+    """
+    host = str(headers.get("Host") or "").strip()
+    if not _HOST_HEADER_RE.fullmatch(host):
+        return 400, "Missing or malformed Host header"
+    if not _host_allowed(host):
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        return 403, (f"This panel does not answer to the name '{name}'. If that is "
+                     f"how you reach it, start it with --allowed-host {name}")
+
+    safe = method in ("GET", "HEAD", "OPTIONS")
+
+    site = headers.get("Sec-Fetch-Site")
+    if site and site not in ("same-origin", "none"):
+        # Following a link here from somewhere else is fine, and is all that is:
+        # a top-level page load, never an API call, a frame or a subresource.
+        followed_link = (method in ("GET", "HEAD")
+                         and headers.get("Sec-Fetch-Mode") == "navigate"
+                         and headers.get("Sec-Fetch-Dest") == "document"
+                         and not path.startswith("/api/"))
+        if not followed_link:
+            return 403, "Cross-site request refused"
+
+    origin = headers.get("Origin")
+    if origin is not None:
+        try:
+            sent_to = urllib.parse.urlsplit(origin).netloc
+        except ValueError:
+            sent_to = ""
+        if not sent_to or sent_to.lower() != host.lower():
+            return 403, "Cross-site request refused"
+
+    if not safe:
+        if not headers.get(REQUEST_HEADER):
+            return 403, (f"Requests that change something must carry an "
+                         f"{REQUEST_HEADER} header")
+        if has_body and not is_json:
+            return 415, "Request bodies must be application/json"
+    return None
+
+
+@app.before_request
+def _guard_request():
+    refusal = _request_refusal(request.method, request.path, request.headers,
+                               has_body=bool(request.content_length),
+                               is_json=request.is_json)
+    if refusal:
+        status, message = refusal
+        return jsonify({"ok": False, "error": message}), status
+
+
+# Sent with every response, the API's included. The page loads nothing from
+# anywhere else and has no inline script, so the policy can simply say so —
+# which is what turns an escaping bug in app.js from script execution into a
+# rendering glitch. 'unsafe-inline' is for *styles* only: the bars and timelines
+# are positioned with style attributes. The rest keep the panel out of other
+# sites' frames and its answers out of their hands.
+_RESPONSE_HEADERS = {
+    "Content-Security-Policy": ("default-src 'self'; script-src 'self'; "
+                                "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                                "object-src 'none'; base-uri 'none'; "
+                                "form-action 'self'; frame-ancestors 'none'"),
+    "X-Content-Type-Options":       "nosniff",
+    "X-Frame-Options":              "DENY",
+    "Referrer-Policy":              "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Cross-Origin-Opener-Policy":   "same-origin",
+}
+
+
+@app.after_request
+def _harden_response(resp):
+    for name, value in _RESPONSE_HEADERS.items():
+        resp.headers.setdefault(name, value)
+    return resp
+
+
+def _json_body() -> dict:
+    """The request's JSON object, or {} for anything else.
+
+    No force=True: a body is only read as JSON when it says it is, since
+    "application/json" is what a cross-site form cannot send. And always a dict,
+    so a body of `[]` is a missing field rather than an AttributeError.
+    """
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
 
 # Our public-facing address, so the Server page can show admins what players type.
 # Looked up exactly once, at startup — see _fetch_public_ip().
@@ -1430,8 +1597,14 @@ def api_status():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
 
-@app.route("/api/players")
+@app.route("/api/players", methods=["POST"])
 def api_players():
+    """Who is online, by asking the console.
+
+    A POST although it only reads, because of how it reads: it types `list` at
+    the pane. GET is kept to requests that touch nothing — see "Who may talk to
+    the panel" — and a keystroke in the server's console is not nothing.
+    """
     target = _session_target()
     try:
         tmux_send("list", target)
@@ -1705,7 +1878,7 @@ def _parse_player_body(target: str):
 
     Returns (ctx, error_response); exactly one of the two is None.
     """
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     name = str(data.get("name", "")).strip()
     if not _MC_NAME_RE.match(name):
         return None, (jsonify({"ok": False, "error": "Invalid player name"}), 400)
@@ -1939,7 +2112,7 @@ def api_players_ban():
 def api_say():
     target = _session_target()
     try:
-        data = request.get_json(force=True, silent=True) or {}
+        data = _json_body()
         raw = str(data.get("message", "")).strip()
         if not raw:
             return jsonify({"ok": False, "error": "Empty message"}), 400
@@ -2412,7 +2585,7 @@ def _start_server(target: str, gdir: str, jar: str = None, mem: str = None,
 def api_server_start():
     """Send the java start command to the tmux session."""
     target = _session_target()
-    data   = request.get_json(force=True, silent=True) or {}
+    data   = _json_body()
 
     try:
         gdir = tmux_pane_path(target)
@@ -2776,7 +2949,7 @@ def api_server_start_policy_set():
     store never holds a value the reader would then have to refuse.
     """
     session = _session_target().split(":")[0]
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     policy = data.get("start_policy")
     if policy not in _START_POLICIES:
         return jsonify({"ok": False,
@@ -2802,7 +2975,7 @@ def api_server_backup_on_stop_set():
     the stopped server can no longer tell it.
     """
     session = _session_target().split(":")[0]
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     if not isinstance(data.get("backup_on_stop"), bool):
         return jsonify({"ok": False, "error": "backup_on_stop must be true or false"}), 400
     _update_session_state(session, backup_on_stop=data["backup_on_stop"])
@@ -3227,7 +3400,7 @@ def api_activity():
 def api_download_fabric():
     """Run get-me-fabric.sh to download a Fabric server jar into JARS_DIR."""
     target  = _session_target()
-    data    = request.get_json(force=True, silent=True) or {}
+    data    = _json_body()
     version = str(data.get("version", "")).strip()
     app.logger.debug(f"Requested Fabric download for version: '{version}' ({type(version)})")
     app.logger.debug(f"Request JSON data: {json.dumps(data)}")
@@ -3409,7 +3582,7 @@ def api_worlds_save():
     if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before saving a world"}), 409
 
-    data = request.get_json(force=True, silent=True) or {}
+    data = _json_body()
     name = re.sub(r'[^a-zA-Z0-9_-]', '', str(data.get("name", "")).strip())[:50]
 
     try:
@@ -3443,7 +3616,7 @@ def api_worlds_load():
                         "error": "Backing up the world after the last stop — "
                                  "try again when it finishes"}), 409
 
-    data     = request.get_json(force=True, silent=True) or {}
+    data     = _json_body()
     filename = str(data.get("filename", "")).strip()
 
     if not _WORLD_SAVE_RE.match(filename):
@@ -3494,7 +3667,7 @@ def api_worlds_load():
 def api_worlds_delete():
     """Delete a single world save archive."""
     target   = _session_target()
-    data     = request.get_json(force=True, silent=True) or {}
+    data     = _json_body()
     filename = str(data.get("filename", "")).strip()
 
     if not _WORLD_SAVE_RE.match(filename):
@@ -3639,7 +3812,7 @@ def api_mods_update():
     target = _session_target()
     if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
-    data     = request.get_json(force=True, silent=True) or {}
+    data     = _json_body()
     filename = str(data.get("filename", "")).strip()
     version  = str(data.get("version", "")).strip()
     if not _validate_mod_filename(filename):
@@ -3664,7 +3837,7 @@ def api_mods_activate():
     target = _session_target()
     if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
-    data     = request.get_json(force=True, silent=True) or {}
+    data     = _json_body()
     filename = str(data.get("filename", "")).strip()
     if not _validate_mod_filename(filename):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
@@ -3685,7 +3858,7 @@ def api_mods_deactivate():
     target = _session_target()
     if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
-    data     = request.get_json(force=True, silent=True) or {}
+    data     = _json_body()
     filename = str(data.get("filename", "")).strip()
     if not _validate_mod_filename(filename):
         return jsonify({"ok": False, "error": "Invalid filename"}), 400
@@ -3704,7 +3877,7 @@ def api_mods_deactivate():
 def api_mods_delete():
     """Delete a mod from 'active', 'inactive', or 'both' locations."""
     target   = _session_target()
-    data     = request.get_json(force=True, silent=True) or {}
+    data     = _json_body()
     filename = str(data.get("filename", "")).strip()
     location = str(data.get("location", "")).strip()
 
@@ -3871,6 +4044,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VibePanel — Minecraft web frontend")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--allowed-host", action="append", dest="allowed_hosts",
+                        default=None, metavar="NAME",
+                        help="a DNS name the panel is reached by, if it is not this "
+                             "machine's own hostname; repeat for several. A leading "
+                             "dot matches subdomains (.example.ts.net)")
     parser.add_argument("--session", action="append", dest="sessions", default=None,
                         help="tmux target (session, session:window, or session:window.pane); "
                              "repeat for multiple servers: --session mc1 --session mc2")
@@ -3899,6 +4077,9 @@ if __name__ == "__main__":
         MODS_DIR = args.mods_dir
     if args.mods_saves_dir:
         MODS_SAVES_DIR = args.mods_saves_dir
+
+    for name in (args.allowed_hosts or []) + [args.host]:
+        ALLOWED_HOSTS.add(name.strip().lower().rstrip("."))
 
     if args.state_file:
         PANEL_STATE_FILE = os.path.abspath(os.path.expanduser(args.state_file))
