@@ -824,7 +824,12 @@ game dir resolved to the wrong place than a genuinely empty whitelist — note t
 somewhere other than the game dir resolves differently while the server is stopped than
 it does while java is running. `/api/server/status` carries an `ok` flag for the same
 reason: an unreachable tmux pane and an idle one both report `running: false`, and the
-UI has to be able to tell them apart.
+UI has to be able to tell them apart. The Server page and the Overview cards both
+draw `ok: false` as **Unreachable**, with the error, and the Server page holds its
+start form — `updateStartEnabled()` checks `serverError` too, since it runs on every
+keystroke in the form and would otherwise switch Start back on. For a while only the
+Players page looked at the flag, and the Server page showed "Stopped" with a live
+Start button for a pane that was not there.
 
 The roster still resolves its own game dir per request, so this trap is unchanged
 here — but the panel store now records what it believes for each session, and the

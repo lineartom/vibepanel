@@ -1034,7 +1034,8 @@ async function loadOverview() {
     try {
       const res  = await apiFetch(`/api/server/status?s=${encodeURIComponent(s)}`);
       const data = await res.json();
-      overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar, playerCount: null, playersLoaded: false };
+      overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar, playerCount: null, playersLoaded: false,
+                           unreachable: unreachableReason(data) };
       if (!data.running) overviewCache[s].heap = null;
     } catch {
       overviewCache[s] = { ...overviewCache[s], running: null };
@@ -1081,7 +1082,8 @@ async function refreshOverviewStatus() {
       const res  = await apiFetch(`/api/server/status?s=${encodeURIComponent(s)}`);
       const data = await res.json();
       const wasRunning = overviewCache[s]?.running;
-      overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar };
+      overviewCache[s] = { ...overviewCache[s], running: data.running, jar: data.jar,
+                           unreachable: unreachableReason(data) };
       if (data.running) await fetchHeap(s);
       else overviewCache[s].heap = null;
       // If a server just came up, fetch its player count too.
@@ -1104,6 +1106,12 @@ async function refreshOverviewStatus() {
   renderOverviewCards();
 }
 
+// An unreachable pane reports running: false, the same as an idle one, and
+// `ok` is what tells them apart. Null when the pane answered.
+function unreachableReason(status) {
+  return status.ok === false ? (status.error || 'Could not reach the tmux session.') : null;
+}
+
 function renderOverviewCards() {
   const grid    = $('overview-grid');
   const targets = sessions.length ? sessions : [currentSession || ''];
@@ -1112,8 +1120,9 @@ function renderOverviewCards() {
   grid.innerHTML = targets.map(s => {
     const d       = overviewCache[s];
     const running = d?.running;
-    const dotCls  = running === true ? 'running' : running === false ? 'stopped' : 'unknown';
-    const label   = running === true ? 'Running' : running === false ? 'Stopped' : 'Checking…';
+    const lost    = d?.unreachable || null;
+    const dotCls  = lost ? 'unknown' : running === true ? 'running' : running === false ? 'stopped' : 'unknown';
+    const label   = lost ? 'Unreachable' : running === true ? 'Running' : running === false ? 'Stopped' : 'Checking…';
 
     let players = '';
     if (running) {
@@ -1131,7 +1140,7 @@ function renderOverviewCards() {
     return `
       <div class="overview-card" data-session="${esc(s)}">
         <div class="overview-session-name">${esc(s)}</div>
-        <div class="overview-status-row">
+        <div class="overview-status-row"${lost ? ` title="${esc(lost)}"` : ''}>
           <span class="srv-dot ${dotCls}"></span>
           <span class="overview-status-label">${label}</span>
         </div>
@@ -1461,6 +1470,23 @@ async function loadServerStatus() {
   renderStopBackupNote();
 
   const startSec = $('srv-start-section');
+  if (data.ok === false) {
+    // The pane could not be reached at all — no tmux, or a session that is
+    // gone and that the panel does not know where to recreate. That also
+    // reports running: false, and drawing it as "Stopped" with a live Start
+    // button describes a server that is merely idle. It isn't: nothing can be
+    // started until the pane is back, so say what is wrong and hold the form.
+    card.innerHTML = `
+      <div class="srv-status-row">
+        <span class="srv-dot unknown"></span>
+        <span class="srv-status-label">Unreachable</span>
+      </div>
+      <div class="srv-jar">${esc(serverError || 'Could not reach the tmux session.')}</div>`;
+    startSec.hidden = false;
+    startSec.classList.add('srv-start-disabled');
+    setStartFormDisabled(true);
+    return;
+  }
   if (data.running) {
     // What it is running, read off the process itself: the jar, and the heap it
     // was given. Either can be unknown — a command line with no -jar, a -Xmx we
@@ -1648,7 +1674,10 @@ function updateStartEnabled() {
   // Held while the world is being tarred after the last stop: starting into it
   // would corrupt the archive. /api/server/start refuses too — this is so the
   // button matches, and the status card says why.
-  $('btn-start').disabled = !ready || serverRunning === true || stopBackupBusy;
+  // And while the pane is unreachable, when there is nowhere to type a start
+  // command — checked here as well as in loadServerStatus() because this runs
+  // on every keystroke in the form and would otherwise switch Start back on.
+  $('btn-start').disabled = !ready || serverRunning === true || stopBackupBusy || !!serverError;
 }
 
 document.querySelectorAll('input[name="start-mode"]').forEach(radio => {
