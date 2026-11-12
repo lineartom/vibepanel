@@ -289,6 +289,18 @@ def pane_text(raw, limit: int) -> str:
     return _SHELL_UNSAFE_RE.sub('', str(raw)).strip()[:limit]
 
 
+# Control characters, C0 and C1 alike. Quoting does nothing about these: typed
+# at a pane they are *keys* — a newline is Enter, \x03 is Ctrl+C, which abandons
+# the line we were typing and leaves whatever follows it to be read as a new one.
+# So a name that is going to be typed is refused if it holds one, however it is
+# quoted, and wherever it came from — the client, the disk, or somebody's API.
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
+def _has_control_chars(text: str) -> bool:
+    return bool(_CONTROL_CHARS_RE.search(text))
+
+
 def tmux_send(command: str, target: str = None) -> None:
     subprocess.run(
         ["tmux", "send-keys", "-t", target or TMUX_TARGET, command, "Enter"],
@@ -1261,11 +1273,15 @@ def _session_target() -> str:
     return name
 
 
-_MOD_FILE_RE = re.compile(r'^[^\x00/\\]+\.(jar|zip)$', re.IGNORECASE)
+# No separators and no control characters. A mod's name is never typed at the
+# pane, so the second is belt and braces — but one of these names comes from
+# Modrinth rather than from our own disk (see _update_mod), and a filename is
+# the kind of thing that ends up in a command line eventually.
+_MOD_FILE_RE = re.compile(r'[^\x00-\x1f\x7f-\x9f/\\]+\.(jar|zip)', re.IGNORECASE)
 
 
 def _validate_mod_filename(filename: str) -> bool:
-    return bool(_MOD_FILE_RE.match(filename))
+    return bool(_MOD_FILE_RE.fullmatch(filename))
 
 
 def _files_identical(path1: str, path2: str) -> bool:
@@ -2417,8 +2433,14 @@ def _list_jars(gdir: str) -> list:
         return []
     # isfile, not just the suffix: a *directory* named foo.jar would otherwise be
     # offered in the UI and accepted by start, and java would fail on it.
+    #
+    # And no control characters. Selecting from this list is what makes a jar's
+    # name trustworthy as *text*, but the name is then typed at the pane, where
+    # a control character is a key however the path is quoted. Leaving such a
+    # file off the list is the whole check: what is not listed cannot be started.
     return sorted(f for f in entries
-                  if f.endswith(".jar") and os.path.isfile(os.path.join(jars_path, f)))
+                  if f.endswith(".jar") and not _has_control_chars(f)
+                  and os.path.isfile(os.path.join(jars_path, f)))
 
 
 @app.route("/api/server/jars")
@@ -2480,7 +2502,7 @@ def _resolve_start_script(gdir: str, name: str) -> str:
     if "/" in name or "\\" in name or name in (".", ".."):
         raise StartError("Start script must be a plain filename in the game "
                          "directory, with no slashes")
-    if any(ch < " " or ch == "\x7f" for ch in name):
+    if _has_control_chars(name):
         raise StartError("Start script name contains control characters")
 
     real = os.path.realpath(os.path.join(gdir, name))
@@ -2531,6 +2553,9 @@ def _start_server(target: str, gdir: str, jar: str = None, mem: str = None,
     mode = str(mode or "jar").strip().lower()
     if mode not in _START_MODES:
         raise StartError(f"Unknown start mode: {mode}")
+    # Both forms type gdir at the pane, so it gets the check the names get.
+    if _has_control_chars(gdir):
+        raise StartError("Game directory path contains control characters")
 
     # Each branch settles on what to run and what to remember about it; the two
     # then share one tail, so a script-started server is launched, guarded and
@@ -3790,7 +3815,7 @@ def api_mods_list():
             return []
         entries = []
         for f in sorted(os.listdir(path), key=str.lower):
-            if _MOD_FILE_RE.match(f):
+            if _validate_mod_filename(f):
                 try:
                     entries.append({"name": f, "size": os.path.getsize(os.path.join(path, f))})
                 except OSError:
@@ -3823,7 +3848,7 @@ def api_mods_updates():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
     try:
         names = [f for f in os.listdir(os.path.join(gdir, MODS_DIR))
-                 if _MOD_FILE_RE.match(f)]
+                 if _validate_mod_filename(f)]
     except OSError:
         names = []
     try:

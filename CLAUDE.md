@@ -243,7 +243,7 @@ ago — so `_resolve_start_script()` checks every claim the name makes instead:
 | check | why |
 |---|---|
 | no `/` or `\`, and not `.`/`..` | it is a filename, not a path; nothing is normalised into something that might resolve |
-| no control characters | the line is typed at a pane, and a newline arrives as **Enter** — ending our command and running the rest. `shlex.quote()` keeps the shell happy with one, which is exactly why quoting cannot be the only check |
+| no control characters (`_has_control_chars()`) | the line is typed at a pane, where a control character is a *key*: a newline arrives as **Enter**, `\x03` as Ctrl+C — abandoning our line and leaving the rest to be read as a new one. `shlex.quote()` keeps the shell happy with either, which is exactly why quoting cannot be the only check |
 | `dirname(realpath(...)) == realpath(gdir)` | the *resolved* path must sit in the game dir, so a symlink pointing out of it is refused too |
 | `isfile()` | directories, fifos and sockets are out |
 | `os.access(X_OK)` | we run it as `./name`; without `+x` that is a shell error in a pane the admin then has to go and read |
@@ -251,6 +251,13 @@ ago — so `_resolve_start_script()` checks every claim the name makes instead:
 It then runs as `cd <gdir> && ./<name>`, both parts `shlex.quote()`d, so a script
 with a space in its name works and the script gets the working directory it is
 entitled to assume.
+
+The same check covers everything else on that line. `_list_jars()` leaves a jar
+whose name holds a control character off the list — and since the list is the gate,
+what is not listed cannot be started — and `_start_server()` refuses a game
+directory path that holds one. Neither is reachable without write access to the game
+dir, which is why they were missing; they are there because "selected from the
+filesystem" makes a name trustworthy as text, not as keystrokes.
 
 `_list_scripts()` fills the name field's `<datalist>` with the game dir's
 executables. It is a **suggestion** list, not the gate — a name typed by hand is
@@ -950,7 +957,10 @@ itself** — the jar picker's rule: the client selects a file that is on disk an
 never contributes a URL or a destination name. `_update_mod()` then:
 
 - refuses a URL that is not `https://cdn.modrinth.com/`, a size over
-  `MOD_DOWNLOAD_MAX`, and a filename `_validate_mod_filename()` would not accept;
+  `MOD_DOWNLOAD_MAX`, and a filename `_validate_mod_filename()` would not accept —
+  no separators and no control characters. This is the one filename the panel takes
+  from somewhere other than its own disk, so it is held to the rule for names that
+  get typed even though nothing types it today;
 - streams to a hidden `.tmp` in `mods/` (not `.jar`, so neither the page nor Fabric
   sees it), and discards it unless the SHA-512 matches what Modrinth published;
 - **only then** moves the old jar to `mods-saves/` via `_move_mod_file()` — the same
