@@ -13,6 +13,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import urllib.parse
 import urllib.request
@@ -444,8 +445,9 @@ def _java_under(wrapper_pid: int) -> dict | None:
     /proc/<pid>/cmdline is world-readable, so this works for another user's JVM
     from an unprivileged panel — but `hidepid=2` hides the entry entirely and
     macOS has no /proc at all, hence None being an ordinary answer rather than
-    an error. A java that answers here is still only *evidence*: its cwd stays
-    unreadable without privilege, which is why the caller marks it `wrapped`.
+    an error. A java that answers here is still only *evidence*: another
+    user's cwd is not ours to read, and the panel is never root (_refuse_root),
+    which is why the caller marks it `wrapped`.
     """
     try:
         pids = [int(e) for e in os.listdir("/proc") if e.isdigit()]
@@ -2263,8 +2265,10 @@ def _hsperf_path(pid: int) -> str | None:
     HotSpot hardcodes /tmp for this on Linux — it ignores TMPDIR — so /tmp is
     what matters in deployment; $TMPDIR is checked as well only because macOS
     puts it there and the panel gets developed on one. The directory is named
-    for the *JVM's* user rather than ours, so it is globbed, not assumed: that
-    also lets a panel running as root read a server running as someone else.
+    for the *JVM's* user rather than ours, so it is globbed, not assumed. A
+    server running as someone else is found that way too, and then not read:
+    the file is 0600 and the panel is never root (see _refuse_root), which is
+    the "counter file is not readable" answer.
     """
     roots = ["/tmp"]
     tmp = os.environ.get("TMPDIR")
@@ -4095,7 +4099,38 @@ def api_console_stream():
     )
 
 
+# sysexits.h's EX_CONFIG. Its own status so the unit can tell "will never work
+# as configured" from a crash: vibepanel.service lists it under
+# RestartPreventExitStatus, since restarting every five seconds would only
+# reprint the same refusal.
+EXIT_CONFIG = 78
+
+
+def _refuse_root() -> None:
+    """Exit rather than run as root.
+
+    Everything the panel does, it does as whoever it runs as: it runs a script
+    out of the game dir (get-me-fabric.sh), unpacks archives into it, and writes
+    json there. As root, each of those is a way for whoever can write to the
+    game dir — the game's own user, or a mod running inside the server — to
+    become root. There is nothing the panel needs root *for*: a server running
+    as another user is reached by typing at a pane, which needs no privilege.
+    So it is refused outright rather than supported carefully.
+
+    Not root but still more privileged than the game dir's owner is the admin's
+    own deliberate arrangement, and is left alone.
+    """
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        print("VibePanel will not run as root.\n"
+              "It runs scripts from the game directory and unpacks archives into it, "
+              "so as root\nanything able to write there could become root. Run it as "
+              "the user that owns\nthe game directory instead (User= in "
+              "vibepanel.service).", file=sys.stderr)
+        sys.exit(EXIT_CONFIG)
+
+
 if __name__ == "__main__":
+    _refuse_root()
     parser = argparse.ArgumentParser(description="VibePanel — Minecraft web frontend")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)

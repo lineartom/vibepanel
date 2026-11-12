@@ -4,6 +4,9 @@
 #
 # Adjust User, WorkingDirectory, and --session as needed.
 #
+# User must not be root: the panel refuses to start as root. Use the account that
+# owns the game directory.
+#
 # WorkingDirectory is where VibePanel keeps vibepanel-state.json — the sessions it
 # expects, where each server's game directory is, and which ones to start at boot.
 # It must be writable by User and must not move, or the panel forgets everything
@@ -23,6 +26,9 @@ WorkingDirectory=${INTO}
 ExecStart=${INTO}/.venv/bin/python server.py ${ARGS}
 Restart=on-failure
 RestartSec=5
+# 78 is the panel refusing its configuration outright — today, being run as
+# root (User=root, or no User= at all). Restarting would only repeat it.
+RestartPreventExitStatus=78
 Environment=PYTHONUNBUFFERED=1
 
 # Stop the panel, not the game. A tmux session the panel created itself is a

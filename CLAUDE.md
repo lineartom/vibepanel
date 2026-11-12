@@ -39,6 +39,29 @@ later can move the store.
 | `--port` | — | `8080` | bind port |
 | `--allowed-host` | `ALLOWED_HOSTS` (comma-separated) | *(none)* | a DNS name the panel is reached by, when that is not this machine's own hostname; **repeat** for several. See "Who may talk to the panel" |
 
+## The panel never runs as root
+
+`_refuse_root()` is the first thing `__main__` does: with an effective uid of 0 it
+prints why and exits 78, which `vibepanel.service` lists under
+`RestartPreventExitStatus` so systemd does not retry a refusal every five seconds.
+
+Everything the panel does, it does as whoever it runs as — and several of those
+things take their instructions from the game dir. Download Fabric *executes*
+`<game-dir>/get-me-fabric.sh`; Worlds → Load unpacks an archive from there; the
+Players page writes json there. As root, each is a way for anyone who can write to
+the game dir to become root, and "anyone" includes a mod running inside the server.
+Nothing the panel does needs root: a server running as another user is reached by
+typing at a pane, which takes no privilege at all.
+
+So the su/sudo support below is for a server that runs as a different *unprivileged*
+user from the panel, and its limits are stated as limits rather than worked around:
+the panel cannot read such a server's `cwd` or its heap counters, and does not try
+to acquire the means to.
+
+A panel that is not root but is still more privileged than the game dir's owner has
+the same exposure in miniature. That is treated as the admin's deliberate choice and
+is not checked for.
+
 ## tmux session detection
 
 VibePanel attaches to a tmux pane and reads/writes to it:
@@ -110,7 +133,9 @@ Two things the edge handling gets right on purpose:
   used to be expressed as "`pid` is `None`, so return"; now that `_java_under()`
   finds the JVM through `/proc`, `pid` often isn't, so the rule is carried by
   `wrapped` instead — `_running_game_dir(..., allow_pane=False)`. A wrapped server
-  either gives up its own `cwd` (a root panel can read it) or teaches us nothing.
+  either gives up its own `cwd` — it turned out to run as the panel's own user — or
+  teaches us nothing. Another user's `cwd` is not ours to read, and the panel is
+  never root.
   Reading its **command line** is a separate question, and that we do — see the
   su/sudo section.
 
@@ -1009,9 +1034,10 @@ in bytes, plus `collections`. The Overview card draws them as one bar: the track
 also returns `pid`, and it is always the java process itself — a wrapper's pid is no
 use to anything wanting to read a JVM's counters, so an su/sudo server contributes a
 pid only when `_java_under()` located the real one. That case then turns on file
-permissions: the counter file is mode 0600, so a root panel reads another user's
-server and an unprivileged one gets "counter file is not readable" instead of the
-older, blunter "java process not visible".
+permissions: the counter file is mode 0600 and the panel never runs as root, so a
+server running as another user gets "counter file is not readable" — the heap bar
+is simply not available there — instead of the older, blunter "java process not
+visible".
 
 Every HotSpot JVM memory-maps that file and keeps it current as a matter of course;
 it is what `jstat` reads. The format is a documented binary — 32-byte prologue, then
@@ -1085,8 +1111,8 @@ if it appears to be, the sum was right after all. Do not reach for
 absent entirely for ZGC.
 
 Other things worth knowing about the file: it is mode 0600 and owned by the JVM's
-user, so the directory is globbed rather than assumed (`hsperfdata_*`), which also
-lets a root-run panel read another user's server. HotSpot hardcodes `/tmp` on Linux
+user, so the directory is globbed rather than assumed (`hsperfdata_*`) — it is named
+for the JVM's user, not ours. HotSpot hardcodes `/tmp` on Linux
 and ignores `TMPDIR`; `$TMPDIR` is checked too only because macOS puts it there.
 `-XX:+PerfDisableSharedMem` (common in containers) or `-XX:-UsePerfData` removes the
 file altogether, which is the "no counter file" message.

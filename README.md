@@ -128,6 +128,10 @@ curl -X POST -H 'X-VibePanel: 1' http://localhost:8080/api/server/stop
 
 A systemd unit file is included. Edit `vibepanel.service` to set `User`, `WorkingDirectory`, and your `--session`, then:
 
+`User` must not be root — VibePanel refuses to start as root, because it runs
+scripts and unpacks archives from the server directory. Use the account that owns
+that directory.
+
 `WorkingDirectory` is where VibePanel keeps what it remembers, so it needs to be
 writable by `User` and to stay put. `enable` (not just `start`) is what makes any of
 the boot-time behaviour happen at all.
