@@ -736,6 +736,14 @@ a { text-decoration: none; color: inherit; }
 }
 .mod-item-size { font-size: .73rem; color: var(--text3); }
 
+.mods-update-card { flex-shrink: 0; }
+#mods-update-feedback { font-size: .85rem; margin-top: .4rem; color: var(--text2); }
+#mods-update-feedback:empty { display: none; }
+#mods-update-feedback.fb-error { color: var(--red); }
+.mod-item-update { font-size: .73rem; color: var(--text3); word-break: break-all; }
+.mod-item-update.available { color: var(--green); }
+.mod-item-actions { display: flex; gap: .4rem; flex-shrink: 0; }
+
 .conflict-notice {
   display: flex;
   align-items: center;

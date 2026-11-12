@@ -174,6 +174,7 @@ function resetSessionUi() {
   [['start-feedback',     ''],
    ['say-feedback',       ''],
    ['mods-op-feedback',   ''],
+   ['mods-update-feedback', ''],
    ['worlds-op-feedback', 'worlds-op-feedback'],
    ['world-save-feedback', ''],
    ['players-op-feedback', ''],
@@ -243,6 +244,12 @@ function resetSessionUi() {
   ['mods-active-count', 'mods-inactive-count',
    'roster-count', 'suggest-count'].forEach(id => { $(id).textContent = ''; });
   $('mods-disk-info').hidden   = true;
+  // The update check's results carry live Update buttons — the same hazard as
+  // the conflict notice — and the version typed is one server's version.
+  modUpdates = null;
+  modsBusy   = false;
+  $('mods-update-version').value   = '';
+  $('btn-mods-update-all').hidden  = true;
   $('worlds-disk-info').hidden = true;
   $('whitelist-state').hidden  = true;
 
@@ -1925,6 +1932,9 @@ async function loadMods() {
   try {
     const data = await sessionJson('/api/mods/list');
     if (data === STALE) return;
+    // A prefill only: never over something the admin typed.
+    const ver = $('mods-update-version');
+    if (data.ok && data.game_version && !ver.value) ver.value = data.game_version;
     renderModsList(data);
   } catch (err) {
     const msg = `<p class="hint">Error: ${esc(err.message)}</p>`;
@@ -1946,7 +1956,132 @@ function renderModsList(data) {
   renderModsColumn($('mods-inactive-list'), data.inactive, 'activate',   running);
   $('mods-active-count').textContent   = `(${data.active.length})`;
   $('mods-inactive-count').textContent = `(${data.inactive.length})`;
+
+  // Counted from what is on screen, so a result for a file that has since
+  // left mods/ cannot inflate it.
+  const n = data.active.filter(m => modUpdateFor(m.name)?.status === 'update').length;
+  const all = $('btn-mods-update-all');
+  all.hidden      = n === 0;
+  all.disabled    = running;
+  all.textContent = `Update all (${n})`;
 }
+
+// ── Mod updates ──────────────────────────────────────────
+// Results of the last check, { version, byName }, or null. Keyed by filename
+// and never fetched on its own: the network is touched only on a click.
+let modUpdates = null;
+let modsBusy   = false;
+
+function modUpdateFor(name) {
+  return modUpdates ? modUpdates.byName[name] : undefined;
+}
+
+function modUpdateLine(u, version) {
+  if (!u) return '';
+  if (u.status === 'update') {
+    const bits = [u.new_type !== 'release' ? u.new_type : '', u.new_date].filter(Boolean);
+    return `<div class="mod-item-update available">&rarr; ${esc(u.new_name)}` +
+           (bits.length ? ` &middot; ${esc(bits.join(' · '))}` : '') + '</div>';
+  }
+  const text = { 'current':  `up to date for ${version}`,
+                 'no-build': `no build for ${version} yet`,
+                 'held':     `only ${u.held_type === 'alpha' ? 'an' : 'a'} ${u.held_type} for ${version} so far; this file is a ${u.type}`,
+                 'unknown':  'not on Modrinth' }[u.status] || '';
+  return text ? `<div class="mod-item-update">${esc(text)}</div>` : '';
+}
+
+async function checkModUpdates() {
+  const fb      = $('mods-update-feedback');
+  const btn     = $('btn-mods-check');
+  const version = $('mods-update-version').value.trim();
+  fb.className = '';
+  if (!version) {
+    fb.textContent = 'Enter the Minecraft version to check against.';
+    fb.className   = 'fb-error';
+    return;
+  }
+  btn.disabled = true;
+  fb.textContent = 'Asking Modrinth…';
+  try {
+    const data = await sessionJson('/api/mods/updates?version=' + encodeURIComponent(version));
+    if (data === STALE) { btn.disabled = false; return; }
+    if (data.ok) {
+      const byName = {};
+      data.mods.forEach(m => { byName[m.name] = m; });
+      modUpdates = { version: data.version, byName };
+      const n = data.mods.filter(m => m.status === 'update').length;
+      fb.textContent = data.mods.length === 0 ? 'No active mods to check.'
+        : n === 0 ? `Nothing newer for ${data.version}.`
+        : `${n} update${n === 1 ? '' : 's'} available for ${data.version}.`;
+      loadMods();
+    } else {
+      fb.textContent = `Error: ${data.error}`;
+      fb.className   = 'fb-error';
+    }
+  } catch (err) {
+    fb.textContent = `Network error: ${err.message}`;
+    fb.className   = 'fb-error';
+  }
+  btn.disabled = false;
+}
+
+// Returns true, false, or STALE. Does not redraw: the caller decides when.
+async function updateOneMod(filename) {
+  const fb = $('mods-update-feedback');
+  fb.className   = '';
+  fb.textContent = `Updating ${filename}…`;
+  try {
+    const data = await sessionJson('/api/mods/update', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ filename, version: modUpdates.version }),
+    });
+    if (data === STALE) return STALE;
+    if (data.ok) {
+      delete modUpdates.byName[filename];
+      modUpdates.byName[data.new] = { name: data.new, status: 'current' };
+      fb.textContent = `Updated to ${data.new}; ${data.old} is now inactive.`;
+      return true;
+    }
+    fb.textContent = `${filename}: ${data.error}`;
+    fb.className   = 'fb-error';
+  } catch (err) {
+    fb.textContent = `Network error: ${err.message}`;
+    fb.className   = 'fb-error';
+  }
+  return false;
+}
+
+async function updateMods(filenames) {
+  if (modsBusy || !modUpdates) return;
+  modsBusy = true;
+  document.querySelectorAll('.btn-mod-move, .btn-mod-update, #btn-mods-update-all')
+    .forEach(b => { b.disabled = true; });
+  let done = 0, failed = 0;
+  for (const f of filenames) {
+    const r = await updateOneMod(f);
+    if (r === STALE) return;          // resetSessionUi() already cleared modsBusy
+    if (r) done++; else failed++;
+  }
+  modsBusy = false;
+  // One file leaves its own message standing; a batch gets a summary, unless
+  // something failed — then the failure is the line worth reading.
+  if (filenames.length > 1 && failed === 0) {
+    $('mods-update-feedback').textContent =
+      `Updated ${done} mods; the previous versions are now inactive.`;
+  }
+  loadMods();
+}
+
+$('btn-mods-check').addEventListener('click', checkModUpdates);
+$('mods-update-version').addEventListener('keydown', e => {
+  if (e.key === 'Enter') checkModUpdates();
+});
+$('btn-mods-update-all').addEventListener('click', () => {
+  if (!modUpdates) return;
+  updateMods(Object.values(modUpdates.byName)
+    .filter(m => m.status === 'update').map(m => m.name));
+});
 
 function renderModsColumn(container, mods, action, running) {
   if (mods.length === 0) {
@@ -1959,16 +2094,26 @@ function renderModsColumn(container, mods, action, running) {
 
   let html = '<div class="mods-list">';
   mods.forEach(mod => {
+    // Update results belong to the active column only: an inactive file of the
+    // same name is a different file.
+    const upd = action === 'deactivate' ? modUpdateFor(mod.name) : undefined;
     html += `
       <div class="mod-item">
         <div class="mod-item-info">
           <div class="mod-item-name">${esc(mod.name)}</div>
           <div class="mod-item-size">${fmtBytes(mod.size)}</div>
+          ${modUpdateLine(upd, modUpdates && modUpdates.version)}
         </div>
-        <button class="btn ${btnClass} btn-sm btn-mod-move"
-                data-filename="${esc(mod.name)}"
-                data-action="${action}"
-                ${running ? 'disabled' : ''}>${btnLabel}</button>
+        <div class="mod-item-actions">
+          ${upd && upd.status === 'update' ? `
+          <button class="btn btn-primary btn-sm btn-mod-update"
+                  data-filename="${esc(mod.name)}"
+                  ${running ? 'disabled' : ''}>Update</button>` : ''}
+          <button class="btn ${btnClass} btn-sm btn-mod-move"
+                  data-filename="${esc(mod.name)}"
+                  data-action="${action}"
+                  ${running ? 'disabled' : ''}>${btnLabel}</button>
+        </div>
       </div>`;
   });
   html += '</div>';
@@ -1976,6 +2121,9 @@ function renderModsColumn(container, mods, action, running) {
 
   container.querySelectorAll('.btn-mod-move').forEach(btn => {
     btn.addEventListener('click', () => moveMod(btn.dataset.filename, btn.dataset.action));
+  });
+  container.querySelectorAll('.btn-mod-update').forEach(btn => {
+    btn.addEventListener('click', () => updateMods([btn.dataset.filename]));
   });
 }
 

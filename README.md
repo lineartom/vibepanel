@@ -10,7 +10,7 @@ Leans heavily on `tmux` and `tailscale`. Then tries to stay out of your way as a
 - **Live console** — streams tmux output in real time via Server-Sent Events
 - **Players** — online players via `/list`, plus the full roster from `whitelist.json` / `ops.json` / `banned-players.json` with names and UUIDs; op/de-op, whitelist, remove, and ban/unban from the UI, with add-suggestions scraped from `logs/latest.log`
 - **Say** — broadcasts a message to the server as `[Server]`
-- **Mods** — toggle Fabric mods on/off (moves files between `mods/` and `mods-saves/`); detects byte-for-byte conflicts
+- **Mods** — toggle Fabric mods on/off (moves files between `mods/` and `mods-saves/`); detects byte-for-byte conflicts; **Check for updates** offers a newer build of each active mod for a given Minecraft version (from Modrinth, matched by file hash), and retires the old jar to `mods-saves/`
 - **Worlds** — save, load, and delete world backups as `.tgz` archives; autosaves before loading, and optionally on every stop
 - **Server** — start/stop the server (from a jar with a memory setting, or from the game's own start script), download Fabric jars, view MOTD, server icon, port, Geyser's Bedrock port if it's installed, and the host's public IP; a per-server policy for starting it when the panel starts (never / always / unless it was stopped on purpose) and a checkbox to back up its world whenever it stops
 
@@ -127,7 +127,9 @@ Player edits take one of two routes depending on whether the server is up. While
 
 Nothing about player management reaches the network: UUIDs come from the json files, from `logs/latest.log`, or from whatever the admin pastes into the UUID field. There is no account lookup service involved.
 
-The panel only ever calls out for three things: downloading a Fabric jar, checking the latest Minecraft version, and looking up the host's public IP via `api.ipify.org`. That last one happens once at startup, not per page view; if it fails, the Server page simply shows no IP.
+The panel only ever calls out for four things: downloading a Fabric jar, checking the latest Minecraft version, looking up the host's public IP via `api.ipify.org`, and — only when you press Check or Update on the Mods page — asking Modrinth about the mods you already have. The IP lookup happens once at startup, not per page view; if it fails, the Server page simply shows no IP.
+
+Mod updates never introduce a mod. The panel hashes the jars in `mods/`, asks Modrinth for the newest build of each one's own project for the version you name, and verifies every download against the SHA-512 Modrinth publishes. A jar Modrinth does not recognise is labelled as such and left alone.
 
 ## License
 

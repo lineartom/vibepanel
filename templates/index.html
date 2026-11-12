@@ -291,6 +291,19 @@
       <p id="mods-running-note" class="offline-note" hidden>Stop the server before changing mods.</p>
       <div id="mods-disk-info" class="disk-info" hidden></div>
 
+      <div class="card mods-update-card">
+        <label class="field-label" for="mods-update-version">
+          Check for updates <span class="muted">(newer builds of the active mods, from Modrinth)</span>
+        </label>
+        <div class="dl-row">
+          <input id="mods-update-version" class="mem-input" type="text"
+                 placeholder="Minecraft version" autocomplete="off" spellcheck="false" maxlength="40">
+          <button id="btn-mods-check" class="btn btn-ghost">Check</button>
+          <button id="btn-mods-update-all" class="btn btn-primary" hidden></button>
+        </div>
+        <div id="mods-update-feedback" aria-live="polite"></div>
+      </div>
+
       <div id="mods-op-feedback" aria-live="polite"></div>
 
       <div class="mods-columns">

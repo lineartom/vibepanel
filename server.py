@@ -3,6 +3,7 @@ import os
 import re
 import glob
 import gzip
+import hashlib
 import time
 import json
 import argparse
@@ -12,6 +13,7 @@ import shutil
 import struct
 import subprocess
 import threading
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, date
 from flask import Flask, render_template, request, jsonify, Response, stream_with_context, send_file, abort
@@ -1112,26 +1114,38 @@ def _files_identical(path1: str, path2: str) -> bool:
                 return True
 
 
-def _do_mod_move(src_dir: str, dst_dir: str, filename: str):
+def _move_mod_file(src_dir: str, dst_dir: str, filename: str) -> str:
     """Move filename from src_dir to dst_dir, coalescing identical duplicates.
 
-    Returns a Flask response.  If a non-identical file already exists at dst,
-    returns 409 with conflict=True so the caller can surface a Delete Both option.
+    Returns "moved", "coalesced" (an identical copy was already there, so the
+    source was simply removed), "missing" or "conflict" (a *different* file of
+    that name is at the destination; nothing was touched). Raises OSError.
     """
     src = os.path.join(src_dir, filename)
     dst = os.path.join(dst_dir, filename)
 
     if not os.path.isfile(src):
-        return jsonify({"ok": False, "error": "File not found"}), 404
-
+        return "missing"
     if os.path.isfile(dst):
-        try:
-            same = _files_identical(src, dst)
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"Could not compare files: {e}"}), 500
-        if same:
-            os.remove(src)
-            return jsonify({"ok": True, "coalesced": True})
+        if not _files_identical(src, dst):
+            return "conflict"
+        os.remove(src)
+        return "coalesced"
+    os.makedirs(dst_dir, exist_ok=True)
+    shutil.move(src, dst)
+    return "moved"
+
+
+def _do_mod_move(src_dir: str, dst_dir: str, filename: str):
+    """_move_mod_file() as a Flask response.  A conflict is 409 with
+    conflict=True so the caller can surface a Delete Both option."""
+    try:
+        outcome = _move_mod_file(src_dir, dst_dir, filename)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Could not move file: {e}"}), 500
+    if outcome == "missing":
+        return jsonify({"ok": False, "error": "File not found"}), 404
+    if outcome == "conflict":
         return jsonify({
             "ok":       False,
             "conflict": True,
@@ -1140,10 +1154,259 @@ def _do_mod_move(src_dir: str, dst_dir: str, filename: str):
                 "Remove one version manually, or delete both here."
             ),
         }), 409
-
-    os.makedirs(dst_dir, exist_ok=True)
-    shutil.move(src, dst)
+    if outcome == "coalesced":
+        return jsonify({"ok": True, "coalesced": True})
     return jsonify({"ok": True})
+
+
+# ── Mod updates ──────────────────────────────────────────
+#
+# The mods folder stays the only source of truth: the panel never chooses a mod,
+# it offers a newer build of a file the admin already put there. Identity is the
+# file's own hash — no list, no config, no filename pattern — which Modrinth can
+# resolve to a project and, given a loader and a game version, to that project's
+# newest build. See "Updating mods" in CLAUDE.md.
+
+MODRINTH_API       = "https://api.modrinth.com/v2"
+MODRINTH_CDN_HOST  = "cdn.modrinth.com"
+MOD_LOADER         = "fabric"
+MOD_DOWNLOAD_MAX   = 256 * 1024 * 1024
+_GAME_VERSION_RE   = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9.\-]{0,39}')
+# Modrinth's release channels, most stable first. A file is only ever offered a
+# build at least as stable as itself: see _allowed_channels().
+MOD_CHANNELS       = ("release", "beta", "alpha")
+
+
+class ModUpdateError(Exception):
+    """Carries the HTTP status the endpoint should return."""
+    def __init__(self, message: str, status: int = 502):
+        super().__init__(message)
+        self.status = status
+
+
+def _file_sha512(path: str) -> str:
+    h = hashlib.sha512()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _modrinth_post(path: str, body: dict) -> dict:
+    req = urllib.request.Request(
+        MODRINTH_API + path,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json",
+                 "User-Agent": f"vibepanel/{VERSION}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        raise ModUpdateError(f"Could not reach Modrinth: {e}")
+    if not isinstance(data, dict):
+        raise ModUpdateError("Unexpected answer from Modrinth")
+    return data
+
+
+def _modrinth_primary_file(version: dict) -> dict | None:
+    files = [f for f in version.get("files") or [] if isinstance(f, dict)]
+    return next((f for f in files if f.get("primary")), files[0] if files else None)
+
+
+def _allowed_channels(current_type) -> tuple:
+    """The channels an update may come from, given the channel of the file we
+    hold: its own and anything more stable.  A release never becomes a beta; a
+    beta may become a release.  An unrecognised channel reads as `release`, the
+    strictest answer — the whitelisting rule _start_policy() follows."""
+    try:
+        return MOD_CHANNELS[:MOD_CHANNELS.index(current_type) + 1]
+    except ValueError:
+        return MOD_CHANNELS[:1]
+
+
+def _guess_game_version(gdir: str, session: str) -> str | None:
+    """The Minecraft version in the last-used jar's name, if it has the shape
+    get-me-fabric.sh downloads: fabric-server-mc.<ver>-loader.<…>.jar.  Only a
+    prefill for a field the admin can edit, so anything else is simply None."""
+    m = re.search(r'mc\.(.+?)-loader', _last_jar(gdir, session) or "")
+    if m and _GAME_VERSION_RE.fullmatch(m.group(1)):
+        return m.group(1)
+    return None
+
+
+def _mod_update_report(gdir: str, names: list, game_version: str) -> list:
+    """What Modrinth offers for each named file in MODS_DIR, as a list of
+    {name, status, …} where status is one of:
+
+        update    a different build is the newest for game_version (new_* set)
+        current   the file we hold is that newest build
+        held      the only builds for game_version are less stable than the
+                  file we hold (held_type says how); not offered
+        no-build  Modrinth knows the file, but its project has nothing for
+                  game_version
+        unknown   Modrinth has never seen this file
+
+    Two requests, because the update lookup alone answers nothing at all for
+    both of the last two, and they need different words on screen.  A third
+    (rarely a fourth) only when the newest build overall is on a less stable
+    channel than a file we hold: that file's lookup is redone restricted to
+    _allowed_channels(), since an older, stable-enough build may sit behind it.
+    """
+    hashes = {}
+    for name in names:
+        try:
+            hashes[name] = _file_sha512(os.path.join(gdir, MODS_DIR, name))
+        except OSError:
+            pass
+    if not hashes:
+        return []
+
+    ask     = {"hashes": sorted(set(hashes.values())), "algorithm": "sha512"}
+    known   = _modrinth_post("/version_files", ask)
+    updates = _modrinth_post("/version_files/update",
+                             {**ask, "loaders": [MOD_LOADER],
+                              "game_versions": [game_version]})
+
+    def _channel(version):
+        return version.get("version_type") if isinstance(version, dict) else None
+
+    allowed = {d: _allowed_channels(_channel(known.get(d))) for d in set(hashes.values())}
+    redo = {}                                   # channels → hashes to ask again
+    for digest, latest in updates.items():
+        if digest in allowed and _channel(latest) not in allowed[digest]:
+            redo.setdefault(allowed[digest], []).append(digest)
+    held = {}                                   # digest → the channel refused
+    for channels, digests in redo.items():
+        stable = _modrinth_post("/version_files/update",
+                                {"hashes": sorted(digests), "algorithm": "sha512",
+                                 "loaders": [MOD_LOADER],
+                                 "game_versions": [game_version],
+                                 "version_types": list(channels)})
+        for digest in digests:
+            held[digest] = str(_channel(updates[digest]))
+            updates[digest] = stable.get(digest)
+
+    report = []
+    for name, digest in hashes.items():
+        entry  = {"name": name, "status": "unknown"}
+        latest = updates.get(digest)
+        newest = _modrinth_primary_file(latest) if isinstance(latest, dict) else None
+        if not newest and digest in held:
+            entry.update({"status": "held", "held_type": held[digest],
+                          "type": str(_channel(known.get(digest)))})
+        elif newest:
+            if (newest.get("hashes") or {}).get("sha512") == digest:
+                entry["status"] = "current"
+            else:
+                entry.update({
+                    "status":       "update",
+                    "new_name":     str(newest.get("filename", "")),
+                    "new_size":     newest.get("size"),
+                    "new_version":  str(latest.get("version_number", "")),
+                    "new_type":     str(latest.get("version_type", "")),
+                    "new_date":     str(latest.get("date_published", ""))[:10],
+                    # Not sent to the page: the client names a file, never a URL.
+                    "_url":         str(newest.get("url", "")),
+                    "_sha512":      str((newest.get("hashes") or {}).get("sha512", "")),
+                })
+        elif digest in known:
+            entry["status"] = "no-build"
+        report.append(entry)
+    return report
+
+
+def _public_mod_report(report: list) -> list:
+    return [{k: v for k, v in e.items() if not k.startswith("_")} for e in report]
+
+
+def _download_mod(url: str, sha512: str, size, dest_tmp: str) -> None:
+    """Fetch url into dest_tmp, refusing anything that is not exactly the file
+    Modrinth described.  Leaves nothing behind on failure."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or parts.hostname != MODRINTH_CDN_HOST:
+        raise ModUpdateError("Refusing a download that is not from Modrinth's CDN")
+    if not re.fullmatch(r'[0-9a-f]{128}', sha512):
+        raise ModUpdateError("Modrinth gave no usable hash for this file")
+    if isinstance(size, int) and size > MOD_DOWNLOAD_MAX:
+        raise ModUpdateError("File is larger than the panel will download")
+
+    req = urllib.request.Request(url, headers={"User-Agent": f"vibepanel/{VERSION}"})
+    h, total = hashlib.sha512(), 0
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp, open(dest_tmp, "wb") as out:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MOD_DOWNLOAD_MAX:
+                    raise ModUpdateError("File is larger than the panel will download")
+                h.update(chunk)
+                out.write(chunk)
+        if h.hexdigest() != sha512:
+            raise ModUpdateError("Download did not match the hash Modrinth published; discarded")
+    except ModUpdateError:
+        _remove_quietly(dest_tmp)
+        raise
+    except Exception as e:
+        _remove_quietly(dest_tmp)
+        raise ModUpdateError(f"Download failed: {e}")
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _update_mod(gdir: str, filename: str, game_version: str) -> dict:
+    """Replace one active mod with the newest build of the same project.
+
+    The new jar arrives under Modrinth's own filename; the old one is retired to
+    MODS_SAVES_DIR rather than deleted, so rolling back is Activate/Deactivate.
+    Download and verify first, move second: a failed download changes nothing.
+    """
+    mods_dir  = os.path.join(gdir, MODS_DIR)
+    saves_dir = os.path.join(gdir, MODS_SAVES_DIR)
+    if not os.path.isfile(os.path.join(mods_dir, filename)):
+        raise ModUpdateError("File not found", 404)
+
+    report = _mod_update_report(gdir, [filename], game_version)
+    entry  = report[0] if report else {"status": "unknown"}
+    if entry["status"] != "update":
+        raise ModUpdateError({
+            "current":  "Already up to date",
+            "held":     f"Only a {entry.get('held_type')} build exists for {game_version}, "
+                        f"and this file is a {entry.get('type')}",
+            "no-build": f"No build for {game_version} yet",
+        }.get(entry["status"], "Modrinth does not recognise this file"), 409)
+
+    new_name = entry["new_name"]
+    if not _validate_mod_filename(new_name):
+        raise ModUpdateError("Modrinth offered a file name the panel will not use")
+    final = os.path.join(mods_dir, new_name)
+    if new_name != filename and os.path.exists(final):
+        raise ModUpdateError(f"'{new_name}' is already in the mods directory", 409)
+
+    # Hidden and not ending in .jar: neither the Mods page nor Fabric sees it.
+    tmp = os.path.join(mods_dir, f".{new_name}.{os.getpid()}.tmp")
+    _download_mod(entry["_url"], entry["_sha512"], entry.get("new_size"), tmp)
+    try:
+        outcome = _move_mod_file(mods_dir, saves_dir, filename)
+        if outcome == "conflict":
+            raise ModUpdateError(
+                f"A different '{filename}' is already in the inactive directory, "
+                "so the current one cannot be set aside. Remove one and try again.", 409)
+        os.replace(tmp, final)
+    except ModUpdateError:
+        _remove_quietly(tmp)
+        raise
+    except OSError as e:
+        _remove_quietly(tmp)
+        raise ModUpdateError(f"Could not install the new file: {e}", 500)
+    return {"old": filename, "new": new_name, "version": entry["new_version"]}
 
 
 @app.route("/")
@@ -3336,9 +3599,63 @@ def api_mods_list():
             "ok":       True,
             "active":   _scan(os.path.join(gdir, MODS_DIR)),
             "inactive": _scan(os.path.join(gdir, MODS_SAVES_DIR)),
+            # Prefill for the update check's version field; no network involved.
+            "game_version": _guess_game_version(gdir, target),
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/mods/updates")
+def api_mods_updates():
+    """Ask Modrinth what it offers for each active mod.  Read-only, so it is
+    allowed while the server runs — "are my mods ready for the next version?"."""
+    target  = _session_target()
+    version = request.args.get("version", "").strip()
+    if not _GAME_VERSION_RE.fullmatch(version):
+        return jsonify({"ok": False, "error": "Enter a Minecraft version, e.g. 1.21.1"}), 400
+    try:
+        gdir = tmux_pane_path(target)
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
+    try:
+        names = [f for f in os.listdir(os.path.join(gdir, MODS_DIR))
+                 if _MOD_FILE_RE.match(f)]
+    except OSError:
+        names = []
+    try:
+        report = _mod_update_report(gdir, names, version)
+    except ModUpdateError as e:
+        return jsonify({"ok": False, "error": str(e)}), e.status
+    return jsonify({"ok": True, "version": version, "mods": _public_mod_report(report)})
+
+
+@app.route("/api/mods/update", methods=["POST"])
+def api_mods_update():
+    """Replace one active mod with the newest build for the given version.
+
+    The request names a file in mods/ and a version; the lookup is redone here,
+    so the client never contributes a URL or a destination name."""
+    target = _session_target()
+    if _is_running(target):
+        return jsonify({"ok": False, "error": "Server must be stopped before changing mods"}), 409
+    data     = request.get_json(force=True, silent=True) or {}
+    filename = str(data.get("filename", "")).strip()
+    version  = str(data.get("version", "")).strip()
+    if not _validate_mod_filename(filename):
+        return jsonify({"ok": False, "error": "Invalid filename"}), 400
+    if not _GAME_VERSION_RE.fullmatch(version):
+        return jsonify({"ok": False, "error": "Invalid version string"}), 400
+    try:
+        gdir = tmux_pane_path(target)
+    except subprocess.CalledProcessError:
+        return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
+    try:
+        result = _update_mod(gdir, filename, version)
+    except ModUpdateError as e:
+        return jsonify({"ok": False, "error": str(e)}), e.status
+    print(f"[{target}] mod updated for {version}: {result['old']} -> {result['new']}")
+    return jsonify({"ok": True, **result})
 
 
 @app.route("/api/mods/activate", methods=["POST"])

@@ -882,6 +882,83 @@ miss the cache and re-parse it, the same reason the Activity page doesn't poll. 
 renders into its own container, not `#overview-grid`, so the 15 s card redraws leave
 it alone.
 
+## Updating mods
+
+The Mods page is two folders and the admin decides what is in them; the panel has
+never downloaded a mod, and so has never been responsible for which ones run. The
+update feature keeps as much of that as an update feature can: **it never chooses a
+mod, it offers a newer build of a file the admin already put in `mods/`.**
+
+Identity is the file's own SHA-512 — no mod list, no config file, no filename
+pattern, nothing specific to any mod. Modrinth resolves a hash to a project and,
+given a loader (`MOD_LOADER`, `fabric`) and a game version, to that project's
+newest build. A jar fetched from somewhere else still matches when the bytes are
+the same: Geyser's own download site serves the identical file Modrinth does.
+
+`_mod_update_report()` makes **two** requests, `/version_files` and
+`/version_files/update`, because the second alone returns nothing at all for both
+"Modrinth has never seen this file" and "its project has no build for this
+version", and those are different things to tell an admin — the second one is the
+answer to "are my mods ready for the next version yet?". That question is also why
+the check is allowed while the server runs; only the update itself requires it
+stopped, like every other mod change.
+
+| status | meaning |
+|---|---|
+| `update` | a different build is the newest for that version |
+| `current` | the newest build's hash is the file we hold |
+| `held` | builds exist for that version, but only on a less stable channel than this file |
+| `no-build` | known file, nothing published for that version |
+| `unknown` | not on Modrinth; left alone |
+
+**A file is only offered a build at least as stable as itself**
+(`_allowed_channels()`, over `MOD_CHANNELS` = release, beta, alpha). The channel of
+the file we hold comes from the same `/version_files` answer that says Modrinth
+knows it, so the track is read off the file, not configured: a release stays on
+releases, a beta may take a beta or a release. That is what lets one rule serve
+both fabric-api, which should never drift onto a snapshot build, and Geyser, which
+publishes *every* build as `beta` and would be offered nothing under a blanket
+"releases only". An unrecognised channel reads as `release`, the strictest answer.
+
+The unfiltered lookup still goes first, and only a file whose newest build is too
+unstable is asked about again with `version_types` set — an older, stable-enough
+build may sit behind the newer one. When there is none the status is `held`, which
+is worth its own words: "only a beta for 26.4 so far" tells the admin the project
+is working on it, where "no build" would not. To move a mod onto a less stable
+track the admin installs that build by hand once; the rule follows the file.
+
+`POST /api/mods/update` takes a filename and a version and **redoes the lookup
+itself** — the jar picker's rule: the client selects a file that is on disk and
+never contributes a URL or a destination name. `_update_mod()` then:
+
+- refuses a URL that is not `https://cdn.modrinth.com/`, a size over
+  `MOD_DOWNLOAD_MAX`, and a filename `_validate_mod_filename()` would not accept;
+- streams to a hidden `.tmp` in `mods/` (not `.jar`, so neither the page nor Fabric
+  sees it), and discards it unless the SHA-512 matches what Modrinth published;
+- **only then** moves the old jar to `mods-saves/` via `_move_mod_file()` — the same
+  coalesce/conflict rule as Deactivate — and `os.replace`s the new one into place.
+  Download first, move second: a failed download changes nothing.
+
+The new jar keeps **Modrinth's filename**, never the old one's. Versioned names are
+the only version display the Mods page has, and they are what keeps retired copies
+in `mods-saves/` from colliding — a file kept as `Geyser-Fabric.jar` forever would
+hit the "different content, same name" conflict on its second update.
+
+Nothing is deleted, so rollback is Activate/Deactivate. The cost is that old
+versions accumulate in Inactive, and clearing them out is the admin's job.
+
+The version field is prefilled by `_guess_game_version()` from `last_jar`'s
+`mc.<ver>-loader` (the shape `get-me-fabric.sh` downloads), carried on
+`/api/mods/list` so the prefill costs no request. It is a prefill only: the upgrade
+flow is "download the new Fabric jar, type the new version here, Check", and a
+server that has not yet run the new jar still remembers the old one.
+
+Deliberately not done: installing dependencies a new build declares, checking the
+Inactive column (those are, by definition, out), remembering results anywhere, and
+any check the admin did not click for. `modUpdates` on the client holds the last
+check and is cleared in `resetSessionUi()` — its rows carry live Update buttons,
+the same hazard as the conflict notice.
+
 ## Geyser's Bedrock port
 
 `/api/server/identity` reports `bedrock_port` from `config/Geyser-Fabric/config.yml`
@@ -1127,7 +1204,7 @@ above for the full list.
 
 ## External network access
 
-The panel reaches the internet in exactly **three** places, and the list is meant to
+The panel reaches the internet in exactly **four** places, and the list is meant to
 stay short — default to reading our own files and talking to our own tmux server:
 
 1. `get-me-fabric.sh` downloading a server jar (the whole point of that feature).
@@ -1141,6 +1218,10 @@ resolving lazily there would turn ordinary browsing into traffic against ipify. 
 response is parsed with `ipaddress.ip_address()`, so an error page or junk body yields
 `None` rather than something odd rendered into the UI. If the lookup fails the panel
 simply shows no IP until the next restart.
+
+4. The Mods page's update check and update, against `api.modrinth.com` and
+   `cdn.modrinth.com` — **only on a click**, never on page load or a timer. See
+   "Updating mods".
 
 Notably **not** on the list: any player-account lookup. See the roster section above.
 
