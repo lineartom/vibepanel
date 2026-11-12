@@ -1613,6 +1613,11 @@ def api_players():
     """
     target = _session_target()
     try:
+        # Asked afresh, not taken from what the page last heard: with the server
+        # down this would type `list` at a shell, every time rather than in the
+        # one accepted race between this check and the keystroke.
+        if not _pane_java_info(target)["running"]:
+            return jsonify({"ok": False, "error": "Server is not running"}), 409
         tmux_send("list", target)
         time.sleep(0.8)
         output = tmux_capture(50, target)
@@ -2145,6 +2150,12 @@ def api_say():
             return jsonify({"ok": False,
                             "error": "Nothing left to send after removing characters "
                                      "a shell could act on"}), 400
+        # Checked here, as late as it can be. pane_text() makes the line inert
+        # to a shell, but inert is not the same as wanted: with the server down
+        # `say …` is a command line, and on a host that has a `say` it runs.
+        # The gap between this and the keystroke is the race we accept.
+        if not _pane_java_info(target)["running"]:
+            return jsonify({"ok": False, "error": "Server is not running"}), 409
         tmux_send(f"say {message}", target)
         # Report what actually went out, so the panel's history doesn't claim we
         # broadcast something we altered.

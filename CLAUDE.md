@@ -1183,6 +1183,13 @@ accept that race rather than trying to close it — so a shell may be reading
 instead. `say hi; rm -rf ~` typed at a shell runs `rm`. This is not theoretical;
 it was verified with canary files before being fixed.
 
+The two endpoints that type on an admin's say-so with nothing else in the way —
+`/api/say` and `/api/players` — ask `_pane_java_info()` whether the server is
+running immediately before the keystroke and answer 409 if it is not. That does not
+close the race, and is not meant to: it is what makes it *a race*, a window of
+milliseconds, rather than something a request sent to a stopped server gets every
+time. The page disabling its Send button was never a check; the endpoint is.
+
 So: **free text goes through `pane_text()`**, which removes control characters
 (they reach the foreground process through the pty and can signal it) and the
 shell metacharacters `` ` $ ( ) ; & | < > \ ' " ! ``. Two endpoints supply free
