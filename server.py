@@ -1597,6 +1597,12 @@ def api_status():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
 
+# The console's answer to `list`. Matched whole against the message body, like
+# every other line we take the game's word for — see _last_run_ending().
+_LIST_ANSWER_RE = re.compile(
+    r'There are (\d+) of a max(?: of)? (\d+) players online: ?(.*)', re.IGNORECASE)
+
+
 @app.route("/api/players", methods=["POST"])
 def api_players():
     """Who is online, by asking the console.
@@ -1611,10 +1617,11 @@ def api_players():
         time.sleep(0.8)
         output = tmux_capture(50, target)
         for line in reversed(output.strip().splitlines()):
-            m = re.search(
-                r'There are (\d+) of a max(?: of)? (\d+) players online: ?(.*)',
-                line, re.IGNORECASE,
-            )
+            # The whole message body, after the label 26.3 puts on it — not
+            # a search. The console shows chat too, and a player typing the
+            # sentence would otherwise answer for the server: "<Bob> There are
+            # 19 of a max of 20 players online: …" reads as 19 online.
+            m = _LIST_ANSWER_RE.fullmatch(_log_broadcast(line.partition("]: ")[2]))
             if m:
                 count = int(m.group(1))
                 max_p = int(m.group(2))

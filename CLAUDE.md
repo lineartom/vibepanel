@@ -632,6 +632,12 @@ server parsed as the single name `Not` while the header still read 10. `-J`
 rejoins the pieces. It also preserves trailing spaces, which `-p` alone strips, so
 `tmux_capture()` re-strips them to keep the console view as it was.
 
+The `list` answer is then matched with `fullmatch` against the message body
+(`_LIST_ANSWER_RE`, after the `"]: "` split and `_log_broadcast()`), not searched
+for. The pane shows chat as well as the console's own output, so a `search` let a
+player answer on the server's behalf by typing the sentence — the same forgery the
+log readers are anchored against, arriving by a different route.
+
 Note tmux does not reflow scrollback on resize, so one capture can still mix
 lines wrapped at the widths in effect when they were written.
 
