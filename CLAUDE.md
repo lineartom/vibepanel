@@ -748,6 +748,17 @@ with holes in it, which is both slower and confusing to reason about. The Activi
 page is the one feature that does read the rotated archives — whole, not tails, so
 no holes — see its section below.
 
+**The line is matched with `fullmatch` against the message body**, after the
+`"]: "` split and only on timestamped lines — the same anti-spoofing rule as
+`_last_run_ending()`, and it matters more here than anywhere: what this scan finds
+is offered to the admin with a "+ As OP" button, and is where a *stopped* server's
+whitelist takes a UUID from. It used to be an unanchored `search`, so a player
+typing `UUID of player Alice is <uuid>` in chat planted a suggestion of their
+choosing, and `_resolve_uuid()` — which takes the newest sighting — preferred the
+forgery to the genuine line. Chat arrives prefixed (`<Bob> …`), so it can never be
+the whole body. The `System chat: ` label is deliberately *not* stripped: the
+authenticator's line is the server's own logger output and never wears it.
+
 The read itself is `_read_log_tail()`, shared with `_last_run_ending()` — the two
 readers of this file want the same window and the same seek. It **raises** rather
 than swallowing `OSError`, because the start policy has to tell "no log here" from

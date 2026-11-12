@@ -1660,6 +1660,14 @@ _UUID_DASH_RE = re.compile(
 )
 
 # "[12:34:56] [User Authenticator #1/INFO]: UUID of player Notch is 069a79f4-…"
+#
+# Matched with fullmatch against the message *body*, the _last_run_ending()
+# rule, and for a sharper reason than the others: what this finds is offered
+# back to the admin with a "+ As OP" button beside it, and is where a stopped
+# server's whitelist gets a UUID from. latest.log carries chat, so an unanchored
+# search let any player plant a name and UUID of their choosing by typing the
+# sentence — and the forgery, being newer, outranked the genuine line. Chat
+# always arrives prefixed ("<Bob> …"), so it cannot be the whole body.
 _LOG_PLAYER_UUID_RE = re.compile(
     r'UUID of player (\S{1,16}) is '
     r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'
@@ -1816,13 +1824,17 @@ def _scan_latest_log(gdir: str) -> list:
     # config without the time-based trigger can still produce one.
     hits, day, stamp = [], 0, None
     for line in blob.splitlines():
+        # Only a timestamped line can be a log record. Anything else is the
+        # continuation of one — a stack trace, or text that carried a newline
+        # of its own — and is never where an authenticator line comes from.
         t = _LOG_LINE_TIME_RE.match(line)
-        if t:
-            if stamp and t.group(1) < stamp:
-                day += 1
-            stamp = t.group(1)
+        if not t:
+            continue
+        if stamp and t.group(1) < stamp:
+            day += 1
+        stamp = t.group(1)
 
-        hit = _LOG_PLAYER_UUID_RE.search(line)
+        hit = _LOG_PLAYER_UUID_RE.fullmatch(line.partition("]: ")[2])
         if not hit:
             continue
         name = hit.group(1)
