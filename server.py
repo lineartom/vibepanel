@@ -706,6 +706,32 @@ def _confirmed_dir(session: str) -> str | None:
     return st.get("dir") if st.get("dir_confirmed") else None
 
 
+def _ensure_game_subdirs(target: str, gdir: str, *names: str) -> None:
+    """Create a game dir's working directories — if gdir really is the game dir.
+
+    The pages that list jars, mods and world saves create the directories they
+    list, so a new server shows where things go. But `gdir` there is the pane's
+    CWD, and with the server stopped that is wherever the admin's shell is
+    sitting: opening the Mods page with the shell in ~ used to leave ~/mods and
+    ~/mods-saves behind, and the Worlds page ~/world-saves. Those are GETs; they
+    should not be leaving anything anywhere on a guess.
+
+    So only in the directory the panel has *confirmed* — read off a running
+    server — and nowhere else. Before a server's first run nothing is created
+    here, and nothing needs to be: every action that writes into one of these
+    (a download, a save, a deactivate) makes it for itself, and Fabric makes
+    mods/. Best-effort: a listing must not fail because a mkdir did.
+    """
+    known = _confirmed_dir(target.split(":")[0])
+    try:
+        if not known or not os.path.samefile(known, gdir):
+            return
+        for name in names:
+            os.makedirs(os.path.join(gdir, name), exist_ok=True)
+    except OSError:
+        pass
+
+
 # What the panel does with a server when the panel process starts.
 #
 #   never           nothing, ever. The default, and what an unrecognised value
@@ -2599,7 +2625,7 @@ def api_server_jars():
     except subprocess.CalledProcessError:
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
     try:
-        os.makedirs(os.path.join(gdir, JARS_DIR), exist_ok=True)
+        _ensure_game_subdirs(target, gdir, JARS_DIR)
         session = target.split(":")[0]
         return jsonify({"ok": True, "jars": _list_jars(gdir), "jars_dir": JARS_DIR,
                         "last_jar": _last_jar(gdir, session),
@@ -3792,13 +3818,16 @@ def api_worlds_list():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     saves_path = os.path.join(gdir, WORLDS_DIR)
-    os.makedirs(saves_path, exist_ok=True)
+    _ensure_game_subdirs(target, gdir, WORLDS_DIR)
 
     try:
         saves = []
         total = 0
+        # A directory that is not there holds no saves; it is made by the first
+        # save, or by _ensure_game_subdirs() once the game dir is confirmed.
+        names = os.listdir(saves_path) if os.path.isdir(saves_path) else []
         for f in sorted(
-            (f for f in os.listdir(saves_path) if f.endswith(".tgz")),
+            (f for f in names if f.endswith(".tgz")),
             reverse=True,
         ):
             fp   = os.path.join(saves_path, f)
@@ -4024,8 +4053,7 @@ def api_mods_list():
     except subprocess.CalledProcessError:
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
-    os.makedirs(os.path.join(gdir, MODS_DIR), exist_ok=True)
-    os.makedirs(os.path.join(gdir, MODS_SAVES_DIR), exist_ok=True)
+    _ensure_game_subdirs(target, gdir, MODS_DIR, MODS_SAVES_DIR)
 
     def _scan(path):
         if not os.path.isdir(path):

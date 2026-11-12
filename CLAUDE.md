@@ -835,6 +835,14 @@ keystroke in the form and would otherwise switch Start back on. For a while only
 Players page looked at the flag, and the Server page showed "Stopped" with a live
 Start button for a pane that was not there.
 
+The same trap used to *write*. The pages that list jars, mods and world saves
+create the directories they list, and did so in whatever `tmux_pane_path()` returned
+— so opening the Mods page with a stopped server's shell sitting in `~` left
+`~/mods` and `~/mods-saves` behind. `_ensure_game_subdirs()` now creates them only
+when the pane's directory is the session's **confirmed** game dir. Before a server's
+first run nothing is created by looking, and nothing needs to be: each action that
+writes into one of those directories makes it for itself.
+
 The roster still resolves its own game dir per request, so this trap is unchanged
 here — but the panel store now records what it believes for each session, and the
 `/api/server/start-policy` reports it as `dir` / `dir_confirmed` (the Server page no
