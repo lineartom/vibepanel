@@ -7,6 +7,7 @@ import hashlib
 import time
 import json
 import argparse
+import contextlib
 import ipaddress
 import shlex
 import shutil
@@ -1012,6 +1013,52 @@ def _running_game_dir(target: str, pid: int, allow_pane: bool = True) -> str | N
 # after a restart would claim a backup for a stop nobody here saw.
 _STOP_BACKUPS     = {}
 _STOP_BACKUP_LOCK = threading.Lock()
+
+
+# ── One thing at a time with a world ─────────────────────────────────────────
+#
+# Save reads the world for as long as tar takes, Load deletes it and unpacks
+# another, and Start hands it to a JVM that begins writing at once. Any two of
+# those together is a broken archive or a broken world: a Save tarring a world
+# the server has just been started into, a Start launching into a directory
+# Load is half way through replacing, two Loads unpacking over each other.
+# Checking _is_running() does not cover it — that says what the *server* is
+# doing, and these are the panel's own requests racing each other, on separate
+# threads, from two tabs or two admins.
+#
+# So each of the three claims the session's world for as long as it runs, and
+# a second claim is refused rather than queued: the page says what is in the
+# way and the admin tries again, which is also what happens when a stop-backup
+# is running (that keeps its own state, _STOP_BACKUPS, because it outlives the
+# request that noticed the stop; Start and Load check both).
+#
+# In memory and per panel process, like _STOP_BACKUPS: a claim describes a
+# thread of this process, so a restart rightly forgets it.
+_WORLD_CLAIMS      = {}       # session -> what is using its world, as words
+_WORLD_CLAIMS_LOCK = threading.Lock()
+
+
+class WorldBusy(Exception):
+    """The session's world is in use by another operation. str() says which."""
+
+
+@contextlib.contextmanager
+def _world_claim(session: str, doing: str):
+    """Hold a session's world for the body of a `with`, or raise WorldBusy.
+
+    `doing` completes the sentence "The world is …" for whoever is turned away:
+    "being saved", "being loaded", "being started".
+    """
+    with _WORLD_CLAIMS_LOCK:
+        held = _WORLD_CLAIMS.get(session)
+        if held:
+            raise WorldBusy(f"The world is {held} — try again when that finishes")
+        _WORLD_CLAIMS[session] = doing
+    try:
+        yield
+    finally:
+        with _WORLD_CLAIMS_LOCK:
+            _WORLD_CLAIMS.pop(session, None)
 
 
 def _world_member(world_path: str) -> str:
@@ -2632,30 +2679,40 @@ def _start_server(target: str, gdir: str, jar: str = None, mem: str = None,
         launched = selected
         remember = {"last_mode": "jar", "last_jar": selected, "last_mem": mem}
 
-    if _is_running(target):
-        raise StartError("Server is already running", 409)
+    session = target.split(":")[0]
+    # Claimed from the running check to the keystroke, so that a Save or Load
+    # cannot begin in between — and so that one already under way turns this
+    # away. See "One thing at a time with a world".
+    try:
+        with _world_claim(session, "being started"):
+            if _is_running(target):
+                raise StartError("Server is already running", 409)
 
-    # The world is being tarred right now, following the stop that just
-    # happened. Starting into it would have the server writing the directory
-    # tar is reading, and the archive — the whole point of the backup — would be
-    # a broken copy of a perfectly good world. It is a wait of seconds to
-    # minutes, not a refusal: the Start button comes back by itself.
-    if _stop_backup_running(target.split(":")[0]):
-        raise StartError("Backing up the world after the last stop — "
-                         "try again when it finishes", 409)
+            # The world is being tarred right now, following the stop that just
+            # happened. Starting into it would have the server writing the
+            # directory tar is reading, and the archive — the whole point of the
+            # backup — would be a broken copy of a perfectly good world. It is a
+            # wait of seconds to minutes, not a refusal: the Start button comes
+            # back by itself.
+            if _stop_backup_running(session):
+                raise StartError("Backing up the world after the last stop — "
+                                 "try again when it finishes", 409)
 
-    # This used to create the session with `cmd` as its process when one was
-    # missing, which tied the session's life to the server's: stopping the
-    # server took the pane with it, and the panel reads that pane afterwards.
-    # It was also unreachable — resolving gdir above already requires a pane.
-    # _ensure_session only covers the gap between those two, where something
-    # killed the session while this request was in flight.
-    _ensure_session(target)
-    tmux_send(cmd, target)
+            # This used to create the session with `cmd` as its process when one
+            # was missing, which tied the session's life to the server's:
+            # stopping the server took the pane with it, and the panel reads
+            # that pane afterwards. It was also unreachable — resolving gdir
+            # above already requires a pane. _ensure_session only covers the gap
+            # between those two, where something killed the session while this
+            # request was in flight.
+            _ensure_session(target)
+            tmux_send(cmd, target)
+    except WorldBusy as e:
+        raise StartError(str(e), 409)
     # Remember on start, not just on stop, so stops that happen outside the
     # panel (console 'stop', a crash) still leave a sensible default behind —
     # and so the startup pass knows what to launch and with how much.
-    _remember_run(gdir, target.split(":")[0], **remember)
+    _remember_run(gdir, session, **remember)
     return launched
 
 
@@ -3669,9 +3726,6 @@ def api_worlds_list():
 def api_worlds_save():
     """Tar the 'world' directory into a timestamped archive in WORLDS_DIR."""
     target = _session_target()
-    if _is_running(target):
-        return jsonify({"ok": False, "error": "Server must be stopped before saving a world"}), 409
-
     data = _json_body()
     name = re.sub(r'[^a-zA-Z0-9_-]', '', str(data.get("name", "")).strip())[:50]
 
@@ -3681,8 +3735,17 @@ def api_worlds_save():
         return jsonify({"ok": False, "error": f"tmux target '{target}' not found"}), 503
 
     try:
-        filename, size = _archive_world(gdir, name or None)
+        # The running check goes *inside* the claim: Start takes the same claim
+        # around its own check and keystroke, so whichever of the two gets
+        # there first, the other sees it.
+        with _world_claim(target.split(":")[0], "being saved"):
+            if _is_running(target):
+                return jsonify({"ok": False,
+                                "error": "Server must be stopped before saving a world"}), 409
+            filename, size = _archive_world(gdir, name or None)
         return jsonify({"ok": True, "filename": filename, "size": size})
+    except WorldBusy as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
     except FileNotFoundError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
     except subprocess.CalledProcessError as e:
@@ -3695,6 +3758,18 @@ def api_worlds_save():
 def api_worlds_load():
     """Autosave current world, delete it, then extract the selected archive."""
     target = _session_target()
+    # Held for the whole of it — the autosave, the delete and the unpack are
+    # minutes during which the world is not a world, and Start must not be able
+    # to launch into the middle. See "One thing at a time with a world".
+    try:
+        with _world_claim(target.split(":")[0], "being loaded"):
+            return _load_world(target)
+    except WorldBusy as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+
+
+def _load_world(target: str):
+    """api_worlds_load()'s body. The caller holds the session's world claim."""
     if _is_running(target):
         return jsonify({"ok": False, "error": "Server must be stopped before loading a world"}), 409
     # Load deletes the current world, and the on-stop backup may still be

@@ -632,6 +632,31 @@ being asked. That also means the Worlds page's **Delete all autosaves** sweeps
 them, which matters — this fires on *every* stop, and a nightly-restarted server
 accumulates one full world archive a day with no retention policy of its own.
 
+### One thing at a time with a world
+
+Save reads the world for as long as tar takes, Load deletes it and unpacks another,
+and Start hands it to a JVM that begins writing at once. Any two together is a
+broken archive or a broken world, and `_is_running()` does not prevent it: that
+says what the *server* is doing, and these are the panel's own requests racing each
+other on separate threads — two tabs, or two admins.
+
+So all three take `_world_claim(session, …)` for as long as they run: Save around
+the tar, Load around the whole autosave → delete → unpack, Start from its running
+check to the keystroke. A second claim is **refused with 409, not queued** — the
+page says what is in the way ("The world is being loaded — try again when that
+finishes") and the admin retries, exactly as with a stop-backup. Save and Load put
+their `_is_running()` check *inside* the claim, because Start holds the same claim
+around its own check and keystroke; with the checks outside, each could pass before
+the other acted.
+
+The on-stop backup keeps its own state (`_STOP_BACKUPS`) rather than a claim: it
+outlives the request that noticed the stop, and Save is deliberately allowed
+alongside it, two readers being harmless. Start and Load check both.
+
+Claims are in memory and per process, like `_STOP_BACKUPS`. What they do not cover
+is what the panel cannot see: a server started by hand at the pane, and the moment
+between Start's keystroke and the JVM appearing on the tty.
+
 ### `_archive_world()` and why it links rather than replaces
 
 The one place a world archive is written: the Worlds page's Save, the autosave
