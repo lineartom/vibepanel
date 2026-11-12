@@ -219,9 +219,13 @@ entirely. There the process is the only account of what was chosen:
 
 Both go through `_remember_run()`, which drops whichever field it could not read,
 so an unparseable command line leaves the previous value standing rather than
-blanking it. The edge writer additionally refuses to write into a directory it
-only *guessed* (`_confirmed_dir()`): recording one game's habits into what may be
-another game's directory is worse than not recording them.
+blanking it. Both also refuse to write into a directory the panel only *guessed*
+(`_confirmed_dir()`): recording one game's habits into what may be another game's
+directory is worse than not recording them. The stop writer used to write to the
+pane's CWD instead, which for a server behind su/sudo is the wrapper's and for one
+whose start script `cd`s is the script's — it now calls `_observe_session()` first,
+so a server nobody has polled since it came up is confirmed there and then, and the
+stop it is about to cause is seen as a running → stopped edge.
 
 `_java_mem()` returns only what the start form can express (`-Xmx4096m` →
 `4096M`); a `-Xmx` in kilobytes, in bytes, or replaced by `MaxRAMPercentage`

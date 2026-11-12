@@ -3206,10 +3206,22 @@ def api_server_stop():
     # the only account of what was chosen. _remember_run() drops whichever of
     # the two we could not read, leaving the previous value rather than
     # blanking it. Best-effort throughout: never block the stop.
+    #
+    # Into the *confirmed* directory only, the rule the edge writer follows.
+    # This used to write to the pane's CWD, which for a server behind su/sudo
+    # is the wrapper's — wherever the admin's shell happened to be — and for
+    # one whose start script cd's is the script's rather than java's. Observing
+    # first means a server nobody has polled since it came up still gets its
+    # directory confirmed (and its run recorded) here, and marks it as running,
+    # so the stop we are about to cause is seen as the edge it is.
     try:
+        session = target.split(":")[0]
         info = _pane_java_info(target)
-        _remember_run(tmux_pane_path(target), target.split(":")[0],
-                      last_jar=info.get("jar"), last_mem=info.get("mem"))
+        _observe_session(target, info)
+        gdir = _confirmed_dir(session)
+        if gdir:
+            _remember_run(gdir, session,
+                          last_jar=info.get("jar"), last_mem=info.get("mem"))
     except Exception:
         pass
     try:
