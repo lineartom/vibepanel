@@ -37,7 +37,7 @@ later can move the store.
 | `--mods-saves-dir` | `MODS_SAVES_DIR` | `mods-saves` | inactive (stashed) mods directory |
 | `--host` | — | `127.0.0.1` | bind address. Loopback by default: there is no login and no TLS, so being reachable from anywhere else has to be something the admin asked for — `install.sh` passes the host's Tailscale address |
 | `--port` | — | `8080` | bind port |
-| `--allowed-host` | `ALLOWED_HOSTS` (comma-separated) | *(none)* | a DNS name the panel is reached by, when that is not this machine's own hostname; **repeat** for several. See "Who may talk to the panel" |
+| `--allowed-host` | `ALLOWED_HOSTS` (comma-separated) | *(none)* | a DNS name the panel is reached by, when that is neither this machine's hostname nor its Tailscale name (both are found without being told); **repeat** for several. See "Who may talk to the panel" |
 
 ## The panel never runs as root
 
@@ -1377,11 +1377,34 @@ endpoint added later is covered without anyone remembering to:
 | `Origin`, when present, must be the origin the request was sent to | a cross-site POST | every browser sends `Origin` with one |
 | anything that is not a GET must carry `X-VibePanel` | the same, in a browser old or odd enough to omit `Origin` | a page on another origin cannot add a header of its own without a CORS preflight, and the panel never grants one |
 
+The first row is a different attack from the other two, and the difference is
+worth keeping straight. A forged request is blind: another site makes the browser
+*send* something and never sees the answer. A rebound one is same-origin, so it
+passes the `Origin` and header rules untouched and can read the console and download
+worlds as well. Only the `Host` check stops it, and it applies however the panel is
+bound — `localhost:8080`, the default, is the classic rebinding target.
+
 `_host_allowed()` accepts an IP literal (there is no name there to rebind),
-`localhost`, the machine's own hostname, and whatever `--allowed-host` adds — a
-leading dot matches subdomains, and `*` turns the check off. It fails closed, and
-the 403 names the flag to pass, because the alternative to an admin reading that
-message is an admin who cannot work out why their MagicDNS name stopped working.
+`localhost`, the machine's own hostname, the names Tailscale gives it, and whatever
+`--allowed-host` adds — a leading dot matches subdomains, and `*` turns the check
+off. It fails closed, and the 403 names the flag to pass.
+
+**The Tailscale names are asked for, not assumed.** `_ask_tailscale()` runs
+`tailscale status --json` and takes `Self.DNSName` — the MagicDNS name, long
+(`host.tailnet.ts.net`) and short. That is the one name an admin is likely to type
+that the OS cannot report: the short form usually matches the hostname, the full one
+never does. Allowing everything under `.ts.net` would be less code and is probably
+safe, but it rests on how somebody else's DNS is run; this rests on our own node
+saying its own name. No Tailscale, logged out, or a CLI that hangs all read as "no
+names" — the timeout is 3 s — and never as an error.
+
+It runs once at startup and again when a `Host` is about to be refused, at most
+once every `_TAILSCALE_RETRY_SECS`. The retry is for boot, where the panel can be up
+before tailscaled is, and for a machine renamed while we run; the interval is what
+stops it being something a stranger's requests can make us do on demand. An empty
+answer never *removes* a name already learned. This is not on the "External network
+access" list below because nothing leaves the machine: the CLI talks to the local
+daemon.
 
 `Sec-Fetch-Site` says what `Origin` says more precisely, and is checked when it is
 there — but **browsers only send it to https and localhost**, and the usual

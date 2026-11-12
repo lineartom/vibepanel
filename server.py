@@ -77,11 +77,13 @@ VERSION = _detect_version()
 # that, applied to every route by one before_request hook so that an endpoint
 # added later is covered without anyone remembering to:
 #
-#   Host        must name this machine. A page that rebinds its own DNS name to
-#               our address is same-origin as far as the browser is concerned,
-#               so nothing sent by the browser can tell it from ours — except
-#               that the Host header still carries *its* name. An IP literal is
-#               always fine: there is no name there to rebind.
+#   Host        must name this machine. This one is against DNS rebinding, a
+#               different attack from the forged request the other two stop: a
+#               page that rebinds its own DNS name to our address is same-origin
+#               as far as the browser is concerned, so it passes both of them
+#               and can read our answers too — except that the Host header
+#               still carries *its* name. An IP literal is always fine: there
+#               is no name there to rebind.
 #   Origin      when present, must be the origin the request was sent to. Every
 #               browser sends it with a cross-origin POST. Sec-Fetch-Site says
 #               the same thing more precisely, but browsers only send it to
@@ -117,6 +119,69 @@ def _own_hostnames() -> set:
 _OWN_HOSTNAMES = _own_hostnames()
 _HOST_HEADER_RE = re.compile(r'[A-Za-z0-9.\-:\[\]]{1,255}')
 
+# The names Tailscale gives this machine — its MagicDNS name, long and short.
+# The one name an admin is likely to type that the OS cannot tell us: the short
+# form usually matches the hostname, the full one (host.tailnet.ts.net) never
+# does, and without this it was refused until somebody passed --allowed-host.
+#
+# Asked of the local tailscaled, not guessed from a suffix. "Anything under
+# .ts.net" would be simpler and is probably safe, but it rests on how somebody
+# else's DNS is run; this rests on nothing but our own node saying its name.
+_TAILSCALE_NAMES      = set()
+_TAILSCALE_ASKED      = None     # time.monotonic() of the last ask, or None
+_TAILSCALE_LOCK       = threading.Lock()
+_TAILSCALE_RETRY_SECS = 60
+_DNS_NAME_RE          = re.compile(r'[a-z0-9]([a-z0-9.\-]{0,253}[a-z0-9])?')
+
+
+def _ask_tailscale() -> set:
+    """This node's MagicDNS names from `tailscale status`, or an empty set.
+
+    Empty is the ordinary answer on a host without Tailscale, one where it is
+    logged out, or one where tailscaled has not come up yet — never an error.
+    No network is involved: the CLI talks to the daemon on this machine.
+    """
+    for argv in (["tailscale", "status", "--json", "--peers=false"],
+                 ["tailscale", "status", "--json"]):     # older CLIs lack --peers
+        try:
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            return set()
+        if out.returncode != 0:
+            continue
+        try:
+            me = json.loads(out.stdout).get("Self") or {}
+            name = str(me.get("DNSName") or "").strip().lower().rstrip(".")
+        except (ValueError, AttributeError):
+            return set()
+        if not _DNS_NAME_RE.fullmatch(name):
+            return set()
+        return {name, name.split(".")[0]}
+    return set()
+
+
+def _refresh_tailscale_names(force: bool = False) -> set:
+    """Ask Tailscale for our names, at most once a minute unless forced.
+
+    Called at startup, and again when a Host is about to be refused: at boot
+    the panel can be up before tailscaled is, and a machine can be renamed
+    while we run. The interval is what keeps that second call from being
+    something a stranger's requests can make us do on demand.
+    """
+    global _TAILSCALE_NAMES, _TAILSCALE_ASKED
+    with _TAILSCALE_LOCK:
+        now = time.monotonic()
+        if (force or _TAILSCALE_ASKED is None
+                or now - _TAILSCALE_ASKED >= _TAILSCALE_RETRY_SECS):
+            _TAILSCALE_ASKED = now
+            names = _ask_tailscale()
+            if names and names != _TAILSCALE_NAMES:
+                print("Tailscale name: " + ", ".join(sorted(names, key=len, reverse=True)))
+            # An empty answer keeps what we had: tailscaled restarting must not
+            # lock out a name it gave us a minute ago.
+            _TAILSCALE_NAMES = names or _TAILSCALE_NAMES
+        return _TAILSCALE_NAMES
+
 
 def _host_allowed(host_header) -> bool:
     """Whether a Host header names this panel. See the note above."""
@@ -139,7 +204,12 @@ def _host_allowed(host_header) -> bool:
         return True
     if "*" in ALLOWED_HOSTS or name in ALLOWED_HOSTS:
         return True
-    return any(a.startswith(".") and name.endswith(a) for a in ALLOWED_HOSTS)
+    if any(a.startswith(".") and name.endswith(a) for a in ALLOWED_HOSTS):
+        return True
+    # Last, because it is the only test here that can cost anything: a name we
+    # already hold is a set lookup, and only one we are about to refuse makes
+    # us ask again — and then no more than once a minute.
+    return name in _TAILSCALE_NAMES or name in _refresh_tailscale_names()
 
 
 def _request_refusal(method: str, path: str, headers, has_body: bool = False,
@@ -4433,6 +4503,7 @@ if __name__ == "__main__":
 
     for name in (args.allowed_hosts or []) + [args.host]:
         ALLOWED_HOSTS.add(name.strip().lower().rstrip("."))
+    _refresh_tailscale_names(force=True)
 
     if args.state_file:
         PANEL_STATE_FILE = os.path.abspath(os.path.expanduser(args.state_file))

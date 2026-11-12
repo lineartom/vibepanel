@@ -116,7 +116,7 @@ Most people need none of these — session names and game directories are rememb
 | `--session` | `TMUX_TARGET` | `minecraft` | tmux target; repeat for several servers. Declares the set and is remembered |
 | `--host` | — | `127.0.0.1` | address to listen on; see "Reaching it from your phone" above |
 | `--port` | — | `8080` | HTTP port |
-| `--allowed-host` | `ALLOWED_HOSTS` | *(none)* | a DNS name you reach the panel by, if it isn't the machine's own hostname (see below); repeat for several |
+| `--allowed-host` | `ALLOWED_HOSTS` | *(none)* | a DNS name you reach the panel by, if it isn't the machine's hostname or Tailscale name (see below); repeat for several |
 | `--state-file` | `STATE_FILE` | `./vibepanel-state.json` | where VibePanel keeps what it remembers |
 | `--jars-dir` | `JARS_DIR` | `server-jars` | where downloaded `.jar` files are stored |
 | `--worlds-dir` | `WORLDS_DIR` | `world-saves` | where world `.tgz` backups are stored |
@@ -129,14 +129,14 @@ All paths are relative to the Minecraft server's working directory (auto-detecte
 ### Which names the panel answers to
 
 VibePanel only answers requests addressed to the machine it runs on: an IP address,
-`localhost`, or the machine's own hostname. That is what stops a web page elsewhere
-from pointing a DNS name of its own at your panel and driving it through your
-browser. If you reach the panel by some other name — a Tailscale MagicDNS name such
-as `myhost.tailnet-name.ts.net`, say — it will refuse with a message telling you to
-add it:
+`localhost`, the machine's own hostname, or its Tailscale MagicDNS name
+(`myhost.tailnet-name.ts.net`, which it asks Tailscale for at startup). That is what
+stops a web page elsewhere from pointing a DNS name of its own at your panel and
+driving it through your browser. If you reach the panel by some other name — through
+a reverse proxy, say — it will refuse with a message telling you to add it:
 
 ```bash
-python server.py --allowed-host myhost.tailnet-name.ts.net
+python server.py --allowed-host panel.example.com
 ```
 
 For the same reason, anything that changes something must come from the panel's own
