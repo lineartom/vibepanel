@@ -262,6 +262,19 @@ transition in six. `srvLastRunning` is read and replaced in one step after the
 across page visits, so a stop that happened while the admin was elsewhere still
 counts on the way back; and it is cleared only on a session switch.
 
+**A pressed Stop is remembered too, in `srvStopping`.** A stop takes as long as the
+world takes to save, and the server is running for all of it — so every poll in
+between redraws the card, and a card drawn from the status alone carries a fresh,
+live Stop button. The button went inert on the click, came back at the next poll,
+and vanished with the server. That the admin clicked is something only the page
+knows, so `stopServer()` records it and the redraw draws "Stopping…" while it
+holds. It is keyed by session, the `sayHistory` rule rather than the
+`resetSessionUi()` one: the stop is still under way on the server that was left.
+It ends when the server is seen stopped, when the request is refused, or after
+`SRV_STOPPING_MAX_MS` (60 s) — a JVM that never goes down must not leave the admin
+with nothing to press. A `stop` typed at the console never showed this, having no
+click to forget.
+
 ### Two start forms: a jar, or the game's own script
 
 Plenty of servers are launched by a `start.sh` of their own — for JVM flags the

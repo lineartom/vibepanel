@@ -1467,6 +1467,31 @@ function srvStopPolling() {
 // session switch.
 let srvLastRunning = null;
 
+// Servers this page has asked to stop and not yet seen stop: session name →
+// the time after which we stop believing it.
+//
+// A stop takes as long as the world takes to save, and for all of that the
+// server is still running — so every poll in between redraws the card, and a
+// card redrawn from the status alone has a fresh, live Stop button on it. That
+// showed as the button going inert on the click, coming back for a moment, and
+// then vanishing with the server. The click is something only this page knows,
+// so it is kept here and the redraw consults it.
+//
+// Keyed by session, like sayHistory, rather than cleared on a switch: the stop
+// is still under way on the server we left, and its tab should say so on the
+// way back. The deadline is what hands the button back if the server never
+// does stop — a hung JVM must not leave the admin with nothing to press.
+const srvStopping = new Map();
+const SRV_STOPPING_MAX_MS = 60000;
+
+function srvIsStopping(session) {
+  const until = srvStopping.get(session);
+  if (until === undefined) return false;
+  if (Date.now() < until) return true;
+  srvStopping.delete(session);
+  return false;
+}
+
 async function loadServerStatus() {
   const card = $('srv-status-card');
   const data = await fetchServerRunning();
@@ -1514,11 +1539,16 @@ async function loadServerStatus() {
     // don't recognise, a privilege wrapper we couldn't see through — so the line
     // is built from whichever we have, and omitted when we have neither.
     const ran = [data.jar, data.mem].filter(Boolean).map(esc).join(' &middot; ');
+    // Still running after we asked it to stop is the ordinary case, not a
+    // failed stop: draw the button the way the click left it.
+    const stopBtn = srvIsStopping(currentSession)
+      ? `<button id="btn-stop" class="btn btn-danger btn-sm" disabled>Stopping&hellip;</button>`
+      : `<button id="btn-stop" class="btn btn-danger btn-sm">&#x25A0; Stop</button>`;
     card.innerHTML = `
       <div class="srv-status-row">
         <span class="srv-dot running"></span>
         <span class="srv-status-label">Running</span>
-        <button id="btn-stop" class="btn btn-danger btn-sm">&#x25A0; Stop</button>
+        ${stopBtn}
       </div>
       ${ran ? `<div class="srv-jar">${ran}</div>` : ''}`;
     // Stopped → running: the panel has just read that jar and heap off the
@@ -1536,6 +1566,8 @@ async function loadServerStatus() {
     setStartFormDisabled(true);
     $('btn-stop').addEventListener('click', stopServer);
   } else {
+    // It stopped, by our asking or otherwise; the next run starts clean.
+    srvStopping.delete(currentSession);
     // Say when a backup is holding Start, rather than leaving a button that is
     // grayed out for no visible reason.
     card.innerHTML = `
@@ -1576,11 +1608,20 @@ function setStartFormDisabled(disabled) {
 async function stopServer() {
   const btn = $('btn-stop');
   if (!btn) return;
+  // The session is taken now: the reply can land after a switch, and it is
+  // this server the note belongs to.
+  const session = currentSession;
+  srvStopping.set(session, Date.now() + SRV_STOPPING_MAX_MS);
   btn.disabled = true;
   btn.textContent = 'Stopping…';
   try {
-    await apiFetch(api('/api/server/stop'), { method: 'POST' });
-  } catch (_) { /* poll will surface any error */ }
+    const res = await apiFetch(api('/api/server/stop'), { method: 'POST' });
+    // Refused — already down, or the pane is gone — so nothing is stopping.
+    // The next status draws whichever it is.
+    if (!res.ok) srvStopping.delete(session);
+  } catch (_) {
+    srvStopping.delete(session);   // never sent; the poll will surface why
+  }
   setTimeout(loadServerStatus, 2000);
 }
 
